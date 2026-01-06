@@ -59,8 +59,5 @@ class StructuredItinerary(BaseModel):
     metadata: ItineraryMetadata
     days: list[DailyItinerary] = Field(..., min_length=1)
     tips: list[str] = Field(default_factory=list, description="General travel tips")
-    tool_trace: list[dict] = Field(
-        default_factory=list,
-        description="Track of tool calls made during generation (Module 8)",
-    )
+    # Note: tool_trace will be added in Module 8 when we implement tool calling
 

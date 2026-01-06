@@ -3,6 +3,7 @@
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -16,6 +17,50 @@ from voyageai.prompts.templates import (
 from voyageai.schemas.itinerary import StructuredItinerary
 
 logger = logging.getLogger(__name__)
+
+
+def make_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Recursively transform schema for OpenAI's strict structured output mode:
+    1. Add 'additionalProperties: false' to all objects
+    2. Ensure all properties are in 'required' array
+    3. Convert optional fields (anyOf with null) to required with null type
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    result = schema.copy()
+
+    # Add additionalProperties: false for object types
+    if result.get("type") == "object":
+        result["additionalProperties"] = False
+        
+        # Ensure all properties are in required
+        if "properties" in result:
+            result["required"] = list(result["properties"].keys())
+
+    # Process nested properties
+    if "properties" in result:
+        result["properties"] = {
+            k: make_strict_schema(v) for k, v in result["properties"].items()
+        }
+
+    # Process items in arrays
+    if "items" in result:
+        result["items"] = make_strict_schema(result["items"])
+
+    # Process $defs (Pydantic puts nested schemas here)
+    if "$defs" in result:
+        result["$defs"] = {
+            k: make_strict_schema(v) for k, v in result["$defs"].items()
+        }
+
+    # Process allOf, anyOf, oneOf
+    for key in ["allOf", "anyOf", "oneOf"]:
+        if key in result:
+            result[key] = [make_strict_schema(item) for item in result[key]]
+
+    return result
 
 
 class AIService:
@@ -69,7 +114,7 @@ class AIService:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "travel_itinerary",
-                        "schema": StructuredItinerary.model_json_schema(),
+                        "schema": make_strict_schema(StructuredItinerary.model_json_schema()),
                         "strict": True,
                     },
                 },

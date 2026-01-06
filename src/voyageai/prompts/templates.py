@@ -90,6 +90,5 @@ ITINERARY_EXAMPLE = {
         "Download Google Maps offline for navigation",
         "Carry cash as many small shops don't accept cards",
     ],
-    "tool_trace": [],
 }
 
