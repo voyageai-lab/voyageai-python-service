@@ -56,3 +56,8 @@ htmlcov/
 Thumbs.db
 
 
+
+# Test and data files
+data/
+docs/*.md
+!docs/README.md
