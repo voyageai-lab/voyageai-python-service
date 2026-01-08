@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from voyageai.config import settings
-from voyageai.routers import health, planning, tools
+from voyageai.routers import health, planning, rag, tools
 
 # Configure logging
 logging.basicConfig(
@@ -35,4 +35,5 @@ app = FastAPI(
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(planning.router, prefix="/api/v1", tags=["Planning"])
 app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
+app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
 
