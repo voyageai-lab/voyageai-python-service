@@ -80,21 +80,23 @@ class ChromaClient:
         
         This should be called during application startup.
         """
-        if self._client is not None:
+        # If already fully initialized, skip
+        if self._client is not None and self._collection is not None:
             return
         
         logger.info(f"Initializing ChromaDB at {self.persist_directory}")
         
-        # Create persistent client
-        self._client = chromadb.PersistentClient(
-            path=self.persist_directory,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True,
+        # Create persistent client if not exists
+        if self._client is None:
+            self._client = chromadb.PersistentClient(
+                path=self.persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True,
+                )
             )
-        )
         
-        # Get or create collection
+        # Get or create collection (may need to recreate after deletion)
         self._collection = self._client.get_or_create_collection(
             name=self.collection_name,
             metadata={
@@ -103,8 +105,9 @@ class ChromaClient:
             }
         )
         
-        # Initialize OpenAI for embeddings
-        self._openai = AsyncOpenAI(api_key=settings.openai_api_key)
+        # Initialize OpenAI for embeddings if not exists
+        if self._openai is None:
+            self._openai = AsyncOpenAI(api_key=settings.openai_api_key)
         
         count = self._collection.count()
         logger.info(f"ChromaDB initialized: {count} documents in '{self.collection_name}'")

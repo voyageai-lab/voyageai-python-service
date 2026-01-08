@@ -157,3 +157,4 @@ class TestGenerateEndpoint:
         response = await client.post("/api/v1/generate", json=request)
         assert response.status_code == 422
 
+

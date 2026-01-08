@@ -163,6 +163,8 @@ class TestChromaClient:
         
         # Clean up first
         await client.delete_collection()
+        # Re-create client after deletion
+        client._collection = None
         await client.initialize()
         
         # Add test documents

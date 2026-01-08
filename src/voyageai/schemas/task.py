@@ -34,3 +34,4 @@ class GenerateResponse(BaseModel):
     error: str | None = None
     processing_time_ms: int = 0
 
+

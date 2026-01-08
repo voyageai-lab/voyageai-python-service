@@ -190,3 +190,4 @@ class TestGenerateResponse:
         assert resp.status == TaskStatus.FAILED
         assert resp.error == "API timeout"
 
+

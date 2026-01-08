@@ -64,3 +64,4 @@ async def generate_itinerary(request: GenerateRequest) -> GenerateResponse:
             processing_time_ms=processing_time_ms,
         )
 
+
