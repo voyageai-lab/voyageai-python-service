@@ -6,13 +6,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from voyageai.config import settings
+from voyageai.logging_config import setup_logging
 from voyageai.routers import health, planning, rag, tools
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG if settings.debug else logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# Initialize structured logging (JSON in production, plain text in debug)
+setup_logging(level="DEBUG" if settings.debug else "INFO")
 logger = logging.getLogger(__name__)
 
 
