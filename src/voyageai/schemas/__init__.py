@@ -8,6 +8,12 @@ from voyageai.schemas.itinerary import (
     StructuredItinerary,
 )
 from voyageai.schemas.task import GenerateRequest, GenerateResponse, TaskStatus
+from voyageai.schemas.tool_metadata import (
+    RateLimitConfig,
+    RateLimitStatus,
+    ToolMetadata,
+    ToolSelectionResult,
+)
 
 __all__ = [
     "Location",
@@ -18,5 +24,10 @@ __all__ = [
     "TaskStatus",
     "GenerateRequest",
     "GenerateResponse",
+    # Module 10: Tool-RAG
+    "ToolMetadata",
+    "ToolSelectionResult",
+    "RateLimitConfig",
+    "RateLimitStatus",
 ]
 
