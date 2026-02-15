@@ -7,15 +7,25 @@ travel itineraries. The agent can:
 2. Use tool results to inform itinerary generation
 3. Track all tool calls for observability
 
+Module 10 Enhancement (Tool-RAG):
+Instead of providing all tools to the LLM (token-heavy, confusing),
+we use semantic search to select only the top-K relevant tools based
+on the user's query. This:
+- Saves tokens (fewer tools in context)
+- Improves accuracy (LLM focuses on relevant tools)
+- Enables scaling to 100+ tools
+
 Tool Calling Flow:
-    User Input → LLM (with tools) → Tool Calls → Execute Tools →
-    Results back to LLM → Final Response
+    User Input → Tool-RAG (select top-K) → LLM (with selected tools) →
+    Tool Calls → Execute Tools → Results back to LLM → Final Response
 
 Example:
     agent = AgentService()
     response = await agent.generate_with_tools(
         requirements="Plan a 3-day trip to Tokyo in March",
-        max_iterations=5
+        max_iterations=5,
+        use_tool_rag=True,  # Enable dynamic tool selection
+        tool_rag_top_k=3    # Select top 3 relevant tools
     )
 """
 
@@ -30,8 +40,10 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
 
 from voyageai.config import settings
+from voyageai.rag.tool_rag import ToolRAG, tool_rag
 from voyageai.schemas.itinerary import StructuredItinerary
 from voyageai.schemas.tool import ToolCallTrace
+from voyageai.schemas.tool_metadata import ToolSelectionResult
 from voyageai.services.ai_service import make_strict_schema
 from voyageai.tools.registry import tool_registry
 
@@ -67,7 +79,7 @@ Always call relevant tools before generating the final itinerary to ensure accur
 
 @dataclass
 class AgentResponse:
-    """Response from the agent including tool trace."""
+    """Response from the agent including tool trace and selection info."""
     
     itinerary: StructuredItinerary | None = None
     tool_trace: list[ToolCallTrace] = field(default_factory=list)
@@ -76,6 +88,9 @@ class AgentResponse:
     error: str | None = None
     total_tokens: int = 0
     processing_time_ms: int = 0
+    # Module 10: Tool-RAG information
+    tool_selection: ToolSelectionResult | None = None
+    selected_tool_names: list[str] = field(default_factory=list)
 
 
 class AgentService:
@@ -88,11 +103,18 @@ class AgentService:
     3. LLM incorporates results into final response
     4. Loop until LLM decides no more tools needed
     
+    Module 10 Enhancement (Tool-RAG):
+    When use_tool_rag is enabled, the agent uses semantic search to
+    select only the most relevant tools for each query, rather than
+    providing all tools. This improves efficiency and accuracy.
+    
     Key Design Decisions:
     - Max iterations to prevent infinite loops
     - All tool calls tracked for observability
     - Parallel tool execution when multiple tools called
     - Structured output for final itinerary
+    - Tool-RAG for dynamic tool selection (Module 10)
+    - Rate limiting for tool execution (Module 10)
     """
     
     def __init__(
@@ -100,6 +122,8 @@ class AgentService:
         model: str | None = None,
         max_iterations: int = 10,
         temperature: float = 0.7,
+        use_tool_rag: bool = False,
+        tool_rag_top_k: int = 3,
     ):
         """
         Initialize the agent service.
@@ -108,21 +132,29 @@ class AgentService:
             model: OpenAI model to use (default from settings)
             max_iterations: Maximum tool calling iterations
             temperature: LLM temperature for generation
+            use_tool_rag: Whether to use Tool-RAG for dynamic tool selection
+            tool_rag_top_k: Number of tools to select when using Tool-RAG
         """
         self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = model or settings.openai_model
         self.max_iterations = max_iterations
         self.temperature = temperature
+        # Module 10: Tool-RAG settings
+        self.use_tool_rag = use_tool_rag
+        self.tool_rag_top_k = tool_rag_top_k
+        self._tool_rag: ToolRAG = tool_rag
     
     async def _execute_tool_calls(
         self,
-        message: ChatCompletionMessage
+        message: ChatCompletionMessage,
+        user_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[ToolCallTrace]]:
         """
         Execute all tool calls from an LLM message.
         
         Args:
             message: LLM message containing tool_calls
+            user_id: Optional user ID for rate limiting
             
         Returns:
             Tuple of (tool_results for next LLM call, tool_traces for logging)
@@ -143,8 +175,13 @@ class AgentService:
                 arguments = {}
                 logger.error(f"Failed to parse tool arguments: {tool_call.function.arguments}")
             
-            # Execute the tool
-            result = await tool_registry.execute(tool_name, arguments)
+            # Execute the tool (with rate limiting if user_id provided)
+            result = await tool_registry.execute(
+                tool_name,
+                arguments,
+                user_id=user_id,
+                enable_rate_limit=user_id is not None
+            )
             
             # Create trace record
             trace = ToolCallTrace(
@@ -177,35 +214,135 @@ class AgentService:
         
         return tool_results, tool_traces
     
+    async def _select_tools_with_rag(
+        self,
+        query: str,
+        top_k: int | None = None,
+    ) -> tuple[list[dict[str, Any]], ToolSelectionResult | None]:
+        """
+        Select relevant tools using Tool-RAG.
+        
+        Args:
+            query: User query for tool selection
+            top_k: Number of tools to select (uses default if None)
+            
+        Returns:
+            Tuple of (OpenAI tools list, selection result for logging)
+        """
+        k = top_k or self.tool_rag_top_k
+        
+        try:
+            # Initialize Tool-RAG if needed
+            await self._tool_rag.initialize()
+            
+            # Select tools
+            selection = await self._tool_rag.select_tools(query, top_k=k)
+            
+            if not selection.selected_tools:
+                # Fallback to all tools if Tool-RAG returns nothing
+                logger.warning("Tool-RAG returned no tools, falling back to all tools")
+                return tool_registry.get_openai_tools(), None
+            
+            # Convert to OpenAI format
+            openai_tools = self._tool_rag.get_openai_tools_from_selection(
+                selection, tool_registry
+            )
+            
+            logger.info(
+                f"Tool-RAG selected {len(openai_tools)} tools: "
+                f"{[t.name for t in selection.selected_tools]} "
+                f"({selection.selection_time_ms}ms)"
+            )
+            
+            return openai_tools, selection
+            
+        except Exception as e:
+            logger.error(f"Tool-RAG failed: {e}, falling back to all tools")
+            return tool_registry.get_openai_tools(), None
+    
     async def generate_with_tools(
         self,
         requirements: str,
         max_iterations: int | None = None,
+        use_tool_rag: bool | None = None,
+        tool_rag_top_k: int | None = None,
+        user_id: str | None = None,
     ) -> AgentResponse:
         """
         Generate an itinerary using the agent with tool calling.
         
         This method:
-        1. Sends the user requirements to the LLM with available tools
-        2. Executes any tool calls the LLM makes
-        3. Loops until LLM stops calling tools or max iterations reached
-        4. Parses the final response into a StructuredItinerary
+        1. (Optional) Uses Tool-RAG to select relevant tools
+        2. Sends the user requirements to the LLM with available tools
+        3. Executes any tool calls the LLM makes
+        4. Loops until LLM stops calling tools or max iterations reached
+        5. Parses the final response into a StructuredItinerary
         
         Args:
             requirements: User's travel requirements
             max_iterations: Override default max iterations
+            use_tool_rag: Override default Tool-RAG setting
+            tool_rag_top_k: Override default Tool-RAG top-K
+            user_id: User ID for rate limiting
             
         Returns:
-            AgentResponse with itinerary and tool trace
+            AgentResponse with itinerary, tool trace, and selection info
         """
         start_time = time.time()
         max_iter = max_iterations or self.max_iterations
         all_tool_traces: list[ToolCallTrace] = []
         total_tokens = 0
         
+        # Determine whether to use Tool-RAG
+        should_use_tool_rag = use_tool_rag if use_tool_rag is not None else self.use_tool_rag
+        rag_top_k = tool_rag_top_k or self.tool_rag_top_k
+        
+        # Select tools (using Tool-RAG or all tools)
+        tool_selection: ToolSelectionResult | None = None
+        selected_tool_names: list[str] = []
+        
+        if should_use_tool_rag:
+            openai_tools, tool_selection = await self._select_tools_with_rag(
+                requirements, top_k=rag_top_k
+            )
+            if tool_selection:
+                selected_tool_names = [t.name for t in tool_selection.selected_tools]
+        else:
+            openai_tools = tool_registry.get_openai_tools()
+            selected_tool_names = tool_registry.list_tools()
+        
+        # Build system prompt that mentions the available tools
+        system_prompt = AGENT_SYSTEM_PROMPT
+        if should_use_tool_rag and tool_selection:
+            # Customize system prompt to mention only selected tools
+            tool_descriptions = "\n".join([
+                f"- {t.name}: {t.description}"
+                for t in tool_selection.selected_tools
+            ])
+            system_prompt = f"""You are an expert travel planner assistant with access to real-time tools.
+
+Your goal is to create detailed, practical travel itineraries. You have access to the following tools:
+{tool_descriptions}
+
+IMPORTANT WORKFLOW:
+1. First, use geocode_location (if available) to get coordinates for the destination
+2. Then use other tools (weather, distance) that need coordinates
+3. Check holidays for the destination country (if available)
+4. Consider currency conversion for budget (if available)
+5. Finally, generate a comprehensive itinerary
+
+When generating the final itinerary:
+- Include specific times for each activity
+- Consider weather conditions when planning outdoor activities
+- Account for holidays (some attractions may be closed)
+- Provide practical budget estimates in local currency
+- Include sunrise/sunset times for photography opportunities
+
+Always call relevant tools before generating the final itinerary to ensure accuracy."""
+        
         # Initialize messages
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": f"""Please create a travel itinerary based on these requirements:
@@ -224,7 +361,7 @@ First, gather relevant information using the available tools, then generate a co
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    tools=tool_registry.get_openai_tools(),
+                    tools=openai_tools,
                     tool_choice="auto",
                     temperature=self.temperature,
                 )
@@ -253,8 +390,10 @@ First, gather relevant information using the available tools, then generate a co
                 
                 # Check if LLM wants to call tools
                 if assistant_message.tool_calls:
-                    # Execute tools
-                    tool_results, traces = await self._execute_tool_calls(assistant_message)
+                    # Execute tools (with rate limiting if user_id provided)
+                    tool_results, traces = await self._execute_tool_calls(
+                        assistant_message, user_id=user_id
+                    )
                     all_tool_traces.extend(traces)
                     
                     # Add tool results to messages
@@ -301,6 +440,7 @@ First, gather relevant information using the available tools, then generate a co
                 logger.info(
                     f"Agent completed: {len(all_tool_traces)} tool calls, "
                     f"{total_tokens} tokens, {processing_time}ms"
+                    + (f", Tool-RAG selected {len(selected_tool_names)} tools" if should_use_tool_rag else "")
                 )
                 
                 return AgentResponse(
@@ -310,6 +450,8 @@ First, gather relevant information using the available tools, then generate a co
                     success=True,
                     total_tokens=total_tokens,
                     processing_time_ms=processing_time,
+                    tool_selection=tool_selection,
+                    selected_tool_names=selected_tool_names,
                 )
             
             # Max iterations reached
@@ -324,6 +466,8 @@ First, gather relevant information using the available tools, then generate a co
                 error=str(e),
                 total_tokens=total_tokens,
                 processing_time_ms=int((time.time() - start_time) * 1000),
+                tool_selection=tool_selection,
+                selected_tool_names=selected_tool_names,
             )
     
     async def call_single_tool(
