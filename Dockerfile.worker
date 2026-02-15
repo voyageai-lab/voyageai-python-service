@@ -1,0 +1,30 @@
+# Worker image for VoyageAI Kafka Worker (Python)
+FROM python:3.13-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc librdkafka-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir --prefix=/install .
+
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    librdkafka1 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r voyageai && useradd -r -g voyageai voyageai
+
+COPY --from=builder /install /usr/local
+COPY src ./src
+
+USER voyageai
+
+# Run the Kafka worker process
+CMD ["python", "-m", "voyageai.kafka.run_worker"]
