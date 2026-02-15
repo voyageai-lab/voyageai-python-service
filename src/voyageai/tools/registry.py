@@ -6,6 +6,7 @@ The ToolRegistry provides:
 - Lookup by tool name
 - Conversion to OpenAI function calling format
 - Execution of tools by name
+- Rate limiting for tool execution (Module 10)
 
 This is the entry point for the agent service to discover and use tools.
 
@@ -15,8 +16,12 @@ Example:
     # Get all tools in OpenAI format
     functions = tool_registry.get_openai_tools()
     
-    # Execute a tool
-    result = await tool_registry.execute("geocode_location", {"location": "Tokyo"})
+    # Execute a tool (with rate limiting)
+    result = await tool_registry.execute(
+        "geocode_location",
+        {"location": "Tokyo"},
+        user_id="user123"
+    )
 """
 
 import logging
@@ -27,6 +32,7 @@ from voyageai.tools.currency import CurrencyTool
 from voyageai.tools.distance import DistanceTool
 from voyageai.tools.geocode import GeocodeTool
 from voyageai.tools.holiday import HolidayTool
+from voyageai.tools.rate_limiter import RateLimitExceeded, RateLimiter, rate_limiter
 from voyageai.tools.timezone import TimeZoneTool
 from voyageai.tools.weather import WeatherTool
 
@@ -114,19 +120,28 @@ class ToolRegistry:
         """
         return [tool.to_openai_function() for tool in self._tools.values()]
     
-    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        user_id: str | None = None,
+        enable_rate_limit: bool = True,
+    ) -> ToolResult:
         """
         Execute a tool by name.
         
         This is the main entry point for tool execution. It:
-        1. Looks up the tool by name
-        2. Validates the tool exists
-        3. Executes the tool with the provided arguments
-        4. Returns the result (success or failure)
+        1. Checks rate limit (if user_id provided and enabled)
+        2. Looks up the tool by name
+        3. Validates the tool exists
+        4. Executes the tool with the provided arguments
+        5. Returns the result (success or failure)
         
         Args:
             name: Name of the tool to execute
             arguments: Dictionary of arguments for the tool
+            user_id: Optional user ID for rate limiting
+            enable_rate_limit: Whether to enforce rate limiting
             
         Returns:
             ToolResult with execution outcome
@@ -143,6 +158,21 @@ class ToolRegistry:
                 error=f"Unknown tool: {name}. Available tools: {', '.join(self.list_tools())}",
                 latency_ms=0
             )
+        
+        # Rate limiting check (Module 10)
+        if enable_rate_limit and user_id:
+            try:
+                await rate_limiter.check_and_consume(user_id, name)
+            except RateLimitExceeded as e:
+                logger.warning(f"Rate limit exceeded for {name} by user {user_id}")
+                return ToolResult(
+                    tool_name=name,
+                    input_args=arguments,
+                    output=None,
+                    success=False,
+                    error=f"Rate limit exceeded. Retry after {e.retry_after:.1f} seconds.",
+                    latency_ms=0
+                )
         
         try:
             logger.info(f"Executing tool: {name} with args: {arguments}")
