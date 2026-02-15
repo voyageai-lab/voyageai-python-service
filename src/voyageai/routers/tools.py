@@ -5,6 +5,7 @@ These endpoints are primarily for:
 1. Testing individual tools work correctly
 2. Debugging tool behavior
 3. Demo purposes
+4. Module 10: Tool-RAG selection testing
 
 In production, tools are typically called by the agent service,
 not directly via these endpoints.
@@ -20,8 +21,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from voyageai.rag.tool_rag import tool_rag
 from voyageai.schemas.tool import ToolCallRequest, ToolCallResponse
+from voyageai.schemas.tool_metadata import ToolMetadata, ToolSelectionResult
 from voyageai.services.agent_service import agent_service
+from voyageai.tools.rate_limiter import rate_limiter
 from voyageai.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
@@ -261,4 +265,168 @@ async def get_holidays(
         "data": result.output,
         "latency_ms": result.latency_ms,
     }
+
+
+# ============================================================================
+# Module 10: Tool-RAG Endpoints
+# ============================================================================
+
+class ToolSelectRequest(BaseModel):
+    """Request for tool selection via Tool-RAG."""
+    query: str = Field(..., description="User query for tool selection")
+    top_k: int = Field(default=3, ge=1, le=10, description="Number of tools to select")
+
+
+class ToolSelectResponse(BaseModel):
+    """Response from Tool-RAG selection."""
+    query: str
+    selected_tools: list[dict[str, Any]]
+    scores: list[float]
+    total_available: int
+    selection_time_ms: int
+
+
+@router.post("/tools/select", response_model=ToolSelectResponse)
+async def select_tools(request: ToolSelectRequest) -> ToolSelectResponse:
+    """
+    Select relevant tools using Tool-RAG.
+    
+    This endpoint demonstrates the Tool-RAG capability:
+    - Takes a user query
+    - Returns top-K semantically similar tools
+    - Shows similarity scores for explainability
+    
+    Example:
+        POST /api/v1/tools/select
+        {
+            "query": "What's the weather like in Tokyo?",
+            "top_k": 3
+        }
+    """
+    try:
+        await tool_rag.initialize()
+        result = await tool_rag.select_tools(request.query, top_k=request.top_k)
+        
+        return ToolSelectResponse(
+            query=result.query,
+            selected_tools=[
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "category": t.category,
+                }
+                for t in result.selected_tools
+            ],
+            scores=result.scores,
+            total_available=result.total_tools_available,
+            selection_time_ms=result.selection_time_ms,
+        )
+    except Exception as e:
+        logger.error(f"Tool selection failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tools/rag/count")
+async def get_tool_rag_count() -> dict[str, Any]:
+    """
+    Get the number of tools in the Tool-RAG collection.
+    
+    Useful for checking if tools have been seeded.
+    """
+    try:
+        await tool_rag.initialize()
+        count = tool_rag.count()
+        return {
+            "count": count,
+            "message": "Run 'python scripts/seed_tools.py' if count is 0"
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Tool-RAG count: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tools/rag/list")
+async def list_tool_rag_tools() -> dict[str, Any]:
+    """
+    List all tools in the Tool-RAG collection.
+    
+    Returns metadata for all indexed tools.
+    """
+    try:
+        await tool_rag.initialize()
+        tools = await tool_rag.list_all_tools()
+        
+        return {
+            "tools": [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "category": t.category,
+                    "example_queries": t.example_queries[:3],  # Limit for readability
+                    "rate_limit_per_minute": t.rate_limit_per_minute,
+                }
+                for t in tools
+            ],
+            "total": len(tools),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list Tool-RAG tools: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Module 10: Rate Limiting Endpoints
+# ============================================================================
+
+@router.get("/tools/ratelimit/status")
+async def get_rate_limit_status(
+    user_id: str = Query(..., description="User ID to check"),
+    tool_name: str = Query(..., description="Tool name to check"),
+) -> dict[str, Any]:
+    """
+    Get rate limit status for a user/tool combination.
+    
+    Returns:
+    - Remaining tokens
+    - Max tokens
+    - Time until full refill
+    
+    Example: /api/v1/tools/ratelimit/status?user_id=user123&tool_name=geocode_location
+    """
+    try:
+        status = await rate_limiter.get_status(user_id, tool_name)
+        return {
+            "user_id": status["user_id"],
+            "tool_name": status["tool_name"],
+            "tokens_remaining": status["tokens_remaining"],
+            "max_tokens": status["max_tokens"],
+            "refill_rate_per_second": status["refill_rate_per_second"],
+            "is_rate_limited": status["tokens_remaining"] <= 0,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get rate limit status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tools/ratelimit/reset")
+async def reset_rate_limit(
+    user_id: str = Query(..., description="User ID to reset"),
+    tool_name: str | None = Query(None, description="Tool name (optional, resets all if not provided)"),
+) -> dict[str, Any]:
+    """
+    Reset rate limit for a user.
+    
+    Admin endpoint for clearing rate limit buckets.
+    
+    Example: /api/v1/tools/ratelimit/reset?user_id=user123&tool_name=geocode_location
+    """
+    try:
+        await rate_limiter.reset(user_id, tool_name)
+        return {
+            "success": True,
+            "message": f"Rate limit reset for user {user_id}" + (f" tool {tool_name}" if tool_name else " (all tools)"),
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset rate limit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
