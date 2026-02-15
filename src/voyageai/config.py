@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     # Session timeout for consumer group rebalancing
     kafka_session_timeout_ms: int = 30000
 
+    # Redis Configuration (Module 12 - Idempotency)
+    redis_url: str = "redis://localhost:6379/0"
+    # Lock TTL for idempotency guard (in seconds)
+    redis_lock_ttl_seconds: int = 3600
+
+    # MongoDB Configuration (Module 12 - Result Storage)
+    mongodb_uri: str = "mongodb://localhost:27017"
+    mongodb_database: str = "voyageai"
+    mongodb_collection_results: str = "planning_results"
+
+    # Worker Configuration (Module 12)
+    worker_pipeline_timeout_seconds: int = 120
+
 
 settings = Settings()
 
