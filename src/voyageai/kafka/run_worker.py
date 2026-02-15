@@ -7,6 +7,7 @@ This starts the Kafka consumer loop that:
 1. Connects to Kafka and subscribes to planning.request
 2. For each message, runs the PlanningWorker pipeline
 3. Handles graceful shutdown on SIGTERM/SIGINT
+4. (Module 13) Uses structured JSON logging in production
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ import sys
 
 from voyageai.kafka.consumer import KafkaRequestConsumer
 from voyageai.kafka.worker import PlanningWorker
+from voyageai.logging_config import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# Initialize structured logging (JSON in production, plain text in debug)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 

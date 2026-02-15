@@ -4,9 +4,17 @@ The worker ties together the full pipeline:
 1. Consume PlanningRequestEvent from Kafka
 2. Check idempotency guard (Redis SETNX)
 3. Send progress events through processing stages
-4. Run the AI agent pipeline (Tool-RAG → tools → structured output)
+4. Run the AI agent pipeline via ResilientAgentPipeline (retry/timeout/fallback)
 5. Save results to MongoDB
 6. Publish PlanningResultEvent back to Kafka
+7. On permanent failure, send to DLQ
+
+Module 13 enhancements:
+- ResilientAgentPipeline wraps agent with retry, timeout, and fallback
+- Dead Letter Queue for permanently failed messages
+- Structured logging with trace_id correlation
+- Cost tracking per task
+- Graceful shutdown with drain support
 
 Progress stages:
     PROCESSING(10%) → RAG_SEARCH(30%) → TOOL_CALLING(50%)
@@ -22,9 +30,12 @@ import time
 from typing import Any
 
 from voyageai.config import settings
+from voyageai.kafka.dlq import DeadLetterProducer
 from voyageai.kafka.idempotency import IdempotencyGuard
 from voyageai.kafka.producer import KafkaProgressProducer
 from voyageai.kafka.schemas import PlanningRequestEvent
+from voyageai.logging_config import clear_trace_context, set_trace_context
+from voyageai.resilience import CostTracker, ResilientAgentPipeline
 from voyageai.services.agent_service import AgentResponse, AgentService
 from voyageai.storage.mongodb import MongoDBResultStore
 
@@ -50,11 +61,13 @@ class PlanningWorker:
         idempotency_guard: IdempotencyGuard | None = None,
         result_store: MongoDBResultStore | None = None,
         agent_service: AgentService | None = None,
+        dlq_producer: DeadLetterProducer | None = None,
     ) -> None:
         self._producer = producer or KafkaProgressProducer()
         self._guard = idempotency_guard or IdempotencyGuard()
         self._store = result_store or MongoDBResultStore()
         self._agent = agent_service or AgentService()
+        self._dlq = dlq_producer or DeadLetterProducer()
 
     def handle_request(self, event: PlanningRequestEvent) -> None:
         """Handle a planning request event from Kafka.
@@ -63,10 +76,20 @@ class PlanningWorker:
         It runs synchronously (in the consumer thread) and uses
         asyncio.run() to execute the async pipeline.
 
+        Module 13 enhancements:
+        - Structured logging with trace context
+        - ResilientAgentPipeline (retry/timeout/fallback)
+        - DLQ for permanent failures
+        - Cost tracking
+
         Args:
             event: The planning request event to process.
         """
         task_id = event.task_id
+
+        # Set trace context for structured logging
+        set_trace_context(task_id=task_id, user_id=event.user_id)
+
         logger.info(
             "Processing planning request: task_id=%s, user_id=%s",
             task_id,
@@ -76,6 +99,7 @@ class PlanningWorker:
         # Step 1: Idempotency check
         if not self._guard.acquire(task_id):
             logger.info("Task already processed, skipping: %s", task_id)
+            clear_trace_context()
             return
 
         start_time = time.time()
@@ -89,7 +113,7 @@ class PlanningWorker:
                 message="Received planning request, starting pipeline...",
             )
 
-            # Step 3: Run the async agent pipeline
+            # Step 3: Run the async agent pipeline with resilience
             response = asyncio.run(
                 self._run_pipeline(event)
             )
@@ -159,7 +183,7 @@ class PlanningWorker:
                 )
 
             else:
-                # Agent failed
+                # Agent failed (after retries and fallback)
                 error_msg = response.error or "Unknown error during generation"
                 self._handle_failure(
                     event, error_msg, processing_time_ms
@@ -170,6 +194,8 @@ class PlanningWorker:
             error_msg = f"Worker error: {type(e).__name__}: {e}"
             logger.exception("Worker failed for task: %s", task_id)
             self._handle_failure(event, error_msg, processing_time_ms)
+        finally:
+            clear_trace_context()
 
     def _handle_failure(
         self,
@@ -177,7 +203,9 @@ class PlanningWorker:
         error: str,
         processing_time_ms: int,
     ) -> None:
-        """Handle task failure: save error, send result, release lock.
+        """Handle task failure: save error, send result, DLQ, release lock.
+
+        Module 13: also sends failed messages to DLQ for manual inspection.
 
         Args:
             event: Original request event.
@@ -222,6 +250,20 @@ class PlanningWorker:
         except Exception as e:
             logger.error("Failed to send failure events: %s", e)
 
+        # Send to Dead Letter Queue for manual inspection
+        try:
+            original_event_dict = json.loads(
+                event.model_dump_json(by_alias=True)
+            )
+            self._dlq.send_to_dlq(
+                original_event=original_event_dict,
+                error=error,
+                attempts=1,
+            )
+            self._dlq.flush(timeout=2.0)
+        except Exception as e:
+            logger.error("Failed to send to DLQ: %s", e)
+
         # Release lock to allow retry
         self._guard.release(task_id)
 
@@ -230,10 +272,11 @@ class PlanningWorker:
     ) -> AgentResponse:
         """Run the async AI agent pipeline with progress updates.
 
-        This is the core async method that orchestrates:
-        1. Tool-RAG for relevant tool selection
-        2. Tool calling with real-time data
-        3. Structured itinerary generation
+        Module 13: Uses ResilientAgentPipeline for:
+        - Retry with exponential backoff on transient failures
+        - Timeout to prevent hung tasks
+        - Fallback response when all retries exhausted
+        - Cost tracking per task
 
         Args:
             event: Planning request event with user requirements.
@@ -259,12 +302,26 @@ class PlanningWorker:
             message="Calling tools to gather real-time data...",
         )
 
-        # Run the agent with tool calling
-        response = await self._agent.generate_with_tools(
+        # Run agent through resilient pipeline (retry/timeout/fallback)
+        pipeline = ResilientAgentPipeline(
+            agent=self._agent,
+            max_retries=3,
+            timeout_seconds=settings.worker_pipeline_timeout_seconds,
+            budget_limit_usd=1.0,
+        )
+
+        response = await pipeline.execute(
             requirements=event.requirements,
-            use_tool_rag=True,
-            tool_rag_top_k=4,
             user_id=event.user_id,
+        )
+
+        # Log cost tracking summary
+        cost_summary = pipeline.cost_tracker.summary()
+        logger.info(
+            "Pipeline cost: tokens=%d, cost=$%.6f, requests=%d",
+            cost_summary["total_tokens"],
+            cost_summary["total_cost_usd"],
+            cost_summary["requests"],
         )
 
         # Progress: Generating phase
@@ -278,9 +335,14 @@ class PlanningWorker:
         return response
 
     def shutdown(self) -> None:
-        """Gracefully shut down worker resources."""
+        """Gracefully shut down worker resources.
+
+        Flushes all producers (including DLQ) before closing
+        to ensure no messages are lost during shutdown.
+        """
         self._producer.flush()
         self._producer.close()
+        self._dlq.close()
         self._guard.close()
         asyncio.run(self._store.close())
         logger.info("Worker shut down")
