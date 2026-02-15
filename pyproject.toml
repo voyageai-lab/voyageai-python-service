@@ -18,6 +18,9 @@ dependencies = [
     "elasticsearch[async]>=8.0.0",
     # Kafka dependencies (Module 11)
     "confluent-kafka>=2.6.0",
+    # Worker dependencies (Module 12)
+    "redis>=5.0.0",
+    "motor>=3.6.0",
 ]
 
 [project.optional-dependencies]
