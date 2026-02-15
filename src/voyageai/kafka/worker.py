@@ -133,7 +133,7 @@ class PlanningWorker:
                 itinerary_json = response.itinerary.model_dump_json()
                 tool_trace_list = [
                     {
-                        "tool": t.name,
+                        "tool": t.tool_name,
                         "arguments": t.arguments,
                         "latency_ms": t.latency_ms,
                         "success": t.success,
