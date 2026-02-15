@@ -22,6 +22,7 @@ from voyageai.tools.timezone import TimeZoneTool
 from voyageai.tools.distance import DistanceTool
 from voyageai.tools.holiday import HolidayTool
 from voyageai.tools.registry import ToolRegistry, tool_registry
+from voyageai.tools.websearch import WebSearchTool
 
 
 # ============================================================================
@@ -179,6 +180,22 @@ class TestWeatherTool:
         
         assert result.success is False
         assert "after" in result.error.lower()
+    
+    @pytest.mark.asyncio
+    async def test_weather_historical_dates(self, tool):
+        """Test weather with past dates uses archive API."""
+        result = await tool.execute(
+            latitude=35.68,
+            longitude=139.76,
+            start_date="2024-03-25",
+            end_date="2024-03-29"
+        )
+        
+        # Should succeed using archive API instead of returning 400
+        assert result.success is True
+        assert result.output is not None
+        assert result.output["data_source"] == "archive (historical)"
+        assert len(result.output["forecast"]) >= 1
 
 
 # ============================================================================
@@ -421,6 +438,44 @@ class TestHolidayTool:
 
 
 # ============================================================================
+# Web Search Tool Tests (uses DuckDuckGo - free, no key)
+# ============================================================================
+
+class TestWebSearchTool:
+    """Tests for WebSearchTool."""
+    
+    @pytest.fixture
+    def tool(self):
+        return WebSearchTool()
+    
+    def test_openai_function_format(self, tool):
+        """Test tool can be converted to OpenAI function format."""
+        func = tool.to_openai_function()
+        
+        assert func["type"] == "function"
+        assert func["function"]["name"] == "web_search"
+        assert "parameters" in func["function"]
+    
+    @pytest.mark.asyncio
+    async def test_search_tokyo_travel(self, tool):
+        """Test searching for Tokyo travel information."""
+        result = await tool.execute(query="best cherry blossom spots Tokyo")
+        
+        assert result.success is True
+        assert result.output is not None
+        assert "results" in result.output
+        assert result.output["query"] == "best cherry blossom spots Tokyo"
+    
+    @pytest.mark.asyncio
+    async def test_search_empty_query(self, tool):
+        """Test search with empty query fails."""
+        result = await tool.execute(query="")
+        
+        assert result.success is False
+        assert "empty" in result.error.lower()
+
+
+# ============================================================================
 # Tool Registry Tests
 # ============================================================================
 
@@ -436,6 +491,7 @@ class TestToolRegistry:
             "convert_timezone",
             "calculate_distance",
             "get_public_holidays",
+            "web_search",
         ]
         
         for tool_name in expected_tools:
@@ -445,7 +501,7 @@ class TestToolRegistry:
         """Test OpenAI tools format is correct."""
         tools = tool_registry.get_openai_tools()
         
-        assert len(tools) >= 6
+        assert len(tools) >= 7
         
         for tool in tools:
             assert tool["type"] == "function"

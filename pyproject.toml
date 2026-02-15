@@ -21,6 +21,8 @@ dependencies = [
     # Worker dependencies (Module 12)
     "redis>=5.0.0",
     "motor>=3.6.0",
+    # MCP (Model Context Protocol) SDK
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

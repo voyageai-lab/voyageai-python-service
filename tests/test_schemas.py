@@ -27,17 +27,21 @@ class TestLocation:
         assert loc.name == "Tokyo Tower"
         assert loc.latitude == 35.6586
 
-    def test_invalid_latitude(self):
-        """Test that invalid latitude raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            Location(name="Invalid", latitude=999, longitude=0)
-        assert "latitude" in str(exc_info.value)
+    def test_latitude_accepts_any_float(self):
+        """Test that latitude accepts any float (validation relaxed for LLM output)."""
+        loc = Location(name="Test", latitude=91.0, longitude=0)
+        assert loc.latitude == 91.0
 
-    def test_invalid_longitude(self):
-        """Test that invalid longitude raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            Location(name="Invalid", latitude=0, longitude=999)
-        assert "longitude" in str(exc_info.value)
+    def test_extra_fields_ignored(self):
+        """Test that extra fields from LLM output are silently ignored."""
+        loc = Location(
+            name="Test",
+            latitude=35.0,
+            longitude=139.0,
+            extra_field="should be ignored",  # type: ignore[call-arg]
+        )
+        assert loc.name == "Test"
+        assert not hasattr(loc, "extra_field")
 
 
 class TestActivity:
@@ -58,41 +62,40 @@ class TestActivity:
         )
         assert activity.activity_id == "act-day1-001"
 
-    def test_invalid_activity_id_pattern(self, valid_location):
-        """Test that invalid activity_id pattern raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            Activity(
-                activity_id="invalid-id",
-                time="09:00-11:00",
-                title="Test",
-                description="Test",
-                location=valid_location,
-            )
-        assert "activity_id" in str(exc_info.value)
+    def test_flexible_activity_id(self, valid_location):
+        """Test that activity_id accepts any string (relaxed for LLM output)."""
+        activity = Activity(
+            activity_id="day1-activity-1",  # Not strict format, but accepted
+            time="09:00-11:00",
+            title="Test",
+            description="Test",
+            location=valid_location,
+        )
+        assert activity.activity_id == "day1-activity-1"
 
-    def test_invalid_time_pattern(self, valid_location):
-        """Test that invalid time pattern raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            Activity(
-                activity_id="act-day1-001",
-                time="9am-11am",  # Invalid format
-                title="Test",
-                description="Test",
-                location=valid_location,
-            )
-        assert "time" in str(exc_info.value)
+    def test_flexible_time_format(self, valid_location):
+        """Test that time accepts any string format (relaxed for LLM output)."""
+        activity = Activity(
+            activity_id="act-day1-001",
+            time="9:00 AM - 11:00 AM",  # Non-strict format, but accepted
+            title="Test",
+            description="Test",
+            location=valid_location,
+        )
+        assert activity.time == "9:00 AM - 11:00 AM"
 
-    def test_title_max_length(self, valid_location):
-        """Test that title over max length raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            Activity(
-                activity_id="act-day1-001",
-                time="09:00-11:00",
-                title="x" * 101,  # Over 100 chars
-                description="Test",
-                location=valid_location,
-            )
-        assert "title" in str(exc_info.value)
+    def test_extra_fields_ignored(self, valid_location):
+        """Test that extra fields from LLM output are silently ignored."""
+        activity = Activity(
+            activity_id="act-day1-001",
+            time="09:00-11:00",
+            title="Test",
+            description="Test",
+            location=valid_location,
+            type="sightseeing",  # type: ignore[call-arg]
+            duration="2 hours",  # type: ignore[call-arg]
+        )
+        assert activity.title == "Test"
 
 
 class TestDailyItinerary:
@@ -119,16 +122,15 @@ class TestDailyItinerary:
         assert day.day_number == 1
         assert len(day.activities) == 1
 
-    def test_invalid_date_format(self, valid_activity):
-        """Test that invalid date format raises error."""
-        with pytest.raises(ValidationError) as exc_info:
-            DailyItinerary(
-                day_number=1,
-                date="March 15, 2026",  # Invalid format
-                theme="Exploration",
-                activities=[valid_activity],
-            )
-        assert "date" in str(exc_info.value)
+    def test_flexible_date_format(self, valid_activity):
+        """Test that date accepts any string format (relaxed for LLM output)."""
+        day = DailyItinerary(
+            day_number=1,
+            date="March 15, 2026",  # Non-ISO format, but accepted
+            theme="Exploration",
+            activities=[valid_activity],
+        )
+        assert day.date == "March 15, 2026"
 
     def test_empty_activities(self):
         """Test that empty activities list raises error."""

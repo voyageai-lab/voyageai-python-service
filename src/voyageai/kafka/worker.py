@@ -33,10 +33,10 @@ from voyageai.config import settings
 from voyageai.kafka.dlq import DeadLetterProducer
 from voyageai.kafka.idempotency import IdempotencyGuard
 from voyageai.kafka.producer import KafkaProgressProducer
-from voyageai.kafka.schemas import PlanningRequestEvent
+from voyageai.kafka.schemas import ClarificationReplyEvent, PlanningRequestEvent
 from voyageai.logging_config import clear_trace_context, set_trace_context
 from voyageai.resilience import CostTracker, ResilientAgentPipeline
-from voyageai.services.agent_service import AgentResponse, AgentService
+from voyageai.services.agent_service import AgentResponse, AgentService, LLMCallRecord, ProgressCallback
 from voyageai.storage.mongodb import MongoDBResultStore
 
 logger = logging.getLogger(__name__)
@@ -113,81 +113,12 @@ class PlanningWorker:
                 message="Received planning request, starting pipeline...",
             )
 
-            # Step 3: Run the async agent pipeline with resilience
-            response = asyncio.run(
-                self._run_pipeline(event)
+            # Step 3: Run the entire async pipeline in a single event loop
+            # This prevents "Event loop is closed" errors from Motor/MongoDB
+            # by keeping all async operations in one asyncio.run() call.
+            asyncio.run(
+                self._run_and_save(event, start_time)
             )
-
-            # Step 4: Calculate processing time
-            processing_time_ms = int((time.time() - start_time) * 1000)
-
-            if response.success and response.itinerary:
-                # Step 5a: Save to MongoDB
-                self._producer.send_progress(
-                    task_id=task_id,
-                    stage="SAVING",
-                    percent=90,
-                    message="Saving itinerary to database...",
-                )
-
-                itinerary_json = response.itinerary.model_dump_json()
-                tool_trace_list = [
-                    {
-                        "tool": t.tool_name,
-                        "arguments": t.arguments,
-                        "latency_ms": t.latency_ms,
-                        "success": t.success,
-                    }
-                    for t in response.tool_trace
-                ]
-
-                asyncio.run(
-                    self._store.save_result(
-                        task_id=task_id,
-                        user_id=event.user_id,
-                        project_id=event.project_id,
-                        status="COMPLETED",
-                        itinerary_json=itinerary_json,
-                        tool_trace=tool_trace_list,
-                        processing_time_ms=processing_time_ms,
-                        total_tokens=response.total_tokens,
-                    )
-                )
-
-                # Step 5b: Send result event
-                self._producer.send_result(
-                    task_id=task_id,
-                    user_id=event.user_id,
-                    project_id=event.project_id,
-                    status="COMPLETED",
-                    itinerary_json=itinerary_json,
-                    tool_trace=tool_trace_list,
-                    processing_time_ms=processing_time_ms,
-                    total_tokens=response.total_tokens,
-                )
-
-                # Step 6: Send completion progress
-                self._producer.send_progress(
-                    task_id=task_id,
-                    stage="COMPLETED",
-                    percent=100,
-                    message="Itinerary generated successfully!",
-                )
-
-                self._guard.mark_completed(task_id)
-                logger.info(
-                    "Task completed: task_id=%s, time=%dms, tokens=%d",
-                    task_id,
-                    processing_time_ms,
-                    response.total_tokens,
-                )
-
-            else:
-                # Agent failed (after retries and fallback)
-                error_msg = response.error or "Unknown error during generation"
-                self._handle_failure(
-                    event, error_msg, processing_time_ms
-                )
 
         except Exception as e:
             processing_time_ms = int((time.time() - start_time) * 1000)
@@ -197,6 +128,145 @@ class PlanningWorker:
         finally:
             clear_trace_context()
 
+    async def _run_and_save(
+        self, event: PlanningRequestEvent, start_time: float
+    ) -> None:
+        """Run pipeline and save result in a single async context.
+
+        Phase 2 enhancement: Pre-flight analysis with clarification questions.
+        If the request is vague, the agent emits a clarification_needed event
+        and returns without generating an itinerary. The worker will be resumed
+        when the user replies.
+
+        This avoids the 'Event loop is closed' error by keeping the
+        agent pipeline and MongoDB save in the same event loop.
+        """
+        task_id = event.task_id
+
+        # Phase 2: Pre-flight analysis — check if clarification is needed
+        progress_callback = self._make_progress_callback(task_id)
+        try:
+            analysis = await self._agent.analyze_request(
+                requirements=event.requirements,
+                conversation_context=event.conversation_context,
+                progress_callback=progress_callback,
+            )
+            if not analysis.get("ready", True):
+                # Clarification needed — send event and stop processing
+                # The task stays in PROCESSING state; it will be resumed
+                # when the user replies via ClarificationReplyEvent.
+                self._producer.send_agent_event(
+                    task_id=task_id,
+                    stage="CLARIFICATION",
+                    percent=15,
+                    message="I have some questions before planning your trip...",
+                    event_type="clarification_needed",
+                    event_data={"questions": analysis.get("questions", [])},
+                )
+                logger.info("Clarification needed for task %s, waiting for user reply", task_id)
+                return
+        except Exception as e:
+            logger.warning("Pre-flight analysis failed, proceeding with planning: %s", e)
+
+        response = await self._run_pipeline(event)
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        if response.success and response.itinerary:
+            # Save to MongoDB
+            self._producer.send_progress(
+                task_id=task_id,
+                stage="SAVING",
+                percent=90,
+                message="Saving itinerary to database...",
+            )
+
+            itinerary_json = response.itinerary.model_dump_json()
+            tool_trace_list = [
+                {
+                    "tool": t.tool_name,
+                    "arguments": t.arguments,
+                    "latency_ms": t.latency_ms,
+                    "success": t.success,
+                }
+                for t in response.tool_trace
+            ]
+            cost_breakdown = self._build_cost_breakdown(response)
+
+            await self._store.save_result(
+                task_id=task_id,
+                user_id=event.user_id,
+                project_id=event.project_id,
+                status="COMPLETED",
+                itinerary_json=itinerary_json,
+                tool_trace=tool_trace_list,
+                processing_time_ms=processing_time_ms,
+                total_tokens=response.total_tokens,
+                total_cost_usd=response.total_cost_usd,
+                cost_breakdown=cost_breakdown,
+            )
+
+            # Send result event
+            self._producer.send_result(
+                task_id=task_id,
+                user_id=event.user_id,
+                project_id=event.project_id,
+                status="COMPLETED",
+                itinerary_json=itinerary_json,
+                tool_trace=tool_trace_list,
+                processing_time_ms=processing_time_ms,
+                total_tokens=response.total_tokens,
+                total_cost_usd=response.total_cost_usd,
+                cost_breakdown=cost_breakdown,
+            )
+
+            # Send completion progress
+            self._producer.send_progress(
+                task_id=task_id,
+                stage="COMPLETED",
+                percent=100,
+                message="Itinerary generated successfully!",
+            )
+
+            self._guard.mark_completed(task_id)
+            logger.info(
+                "Task completed: task_id=%s, time=%dms, tokens=%d, cost=$%.6f",
+                task_id,
+                processing_time_ms,
+                response.total_tokens,
+                response.total_cost_usd,
+            )
+
+        else:
+            # Agent failed (after retries and fallback)
+            error_msg = response.error or "Unknown error during generation"
+            await self._async_handle_failure(
+                event, error_msg, processing_time_ms
+            )
+
+    async def _async_handle_failure(
+        self,
+        event: PlanningRequestEvent,
+        error: str,
+        processing_time_ms: int,
+    ) -> None:
+        """Async version of failure handler (used inside _run_and_save)."""
+        task_id = event.task_id
+
+        try:
+            await self._store.save_result(
+                task_id=task_id,
+                user_id=event.user_id,
+                project_id=event.project_id,
+                status="FAILED",
+                error=error,
+                processing_time_ms=processing_time_ms,
+            )
+        except Exception as e:
+            logger.error("Failed to save error to MongoDB: %s", e)
+
+        self._send_failure_events(event, error, processing_time_ms)
+
     def _handle_failure(
         self,
         event: PlanningRequestEvent,
@@ -205,7 +275,8 @@ class PlanningWorker:
     ) -> None:
         """Handle task failure: save error, send result, DLQ, release lock.
 
-        Module 13: also sends failed messages to DLQ for manual inspection.
+        Called from sync context (exception handler in handle_request).
+        Uses a fresh event loop for MongoDB operations.
 
         Args:
             event: Original request event.
@@ -215,7 +286,6 @@ class PlanningWorker:
         task_id = event.task_id
 
         try:
-            # Save error to MongoDB
             asyncio.run(
                 self._store.save_result(
                     task_id=task_id,
@@ -229,8 +299,18 @@ class PlanningWorker:
         except Exception as e:
             logger.error("Failed to save error to MongoDB: %s", e)
 
+        self._send_failure_events(event, error, processing_time_ms)
+
+    def _send_failure_events(
+        self,
+        event: PlanningRequestEvent,
+        error: str,
+        processing_time_ms: int,
+    ) -> None:
+        """Send failure result/progress events and DLQ (sync, no MongoDB)."""
+        task_id = event.task_id
+
         try:
-            # Send failure result event
             self._producer.send_result(
                 task_id=task_id,
                 user_id=event.user_id,
@@ -240,7 +320,6 @@ class PlanningWorker:
                 processing_time_ms=processing_time_ms,
             )
 
-            # Send failure progress
             self._producer.send_progress(
                 task_id=task_id,
                 stage="FAILED",
@@ -267,6 +346,190 @@ class PlanningWorker:
         # Release lock to allow retry
         self._guard.release(task_id)
 
+    def handle_clarification_reply(self, event: ClarificationReplyEvent) -> None:
+        """Handle a user's reply to clarification questions.
+
+        Enriches the original requirements with the user's answers and
+        re-runs the full planning pipeline.
+
+        Args:
+            event: Clarification reply event with user answers.
+        """
+        task_id = event.task_id
+        set_trace_context(task_id=task_id, user_id=event.user_id)
+
+        logger.info(
+            "Processing clarification reply: task_id=%s, answers=%d",
+            task_id,
+            len(event.answers),
+        )
+
+        start_time = time.time()
+
+        try:
+            # Build enriched requirements from original + answers
+            answer_lines = []
+            for ans in event.answers:
+                q = ans.get("question", "")
+                a = ans.get("answer", "")
+                answer_lines.append(f"- {q}: {a}")
+            answers_text = "\n".join(answer_lines) if answer_lines else ""
+
+            enriched_requirements = (
+                f"{event.original_requirements}\n\n"
+                f"Additional details from user:\n{answers_text}"
+            )
+
+            # Create a synthetic PlanningRequestEvent with enriched requirements.
+            # Preserve conversation_context so the agent keeps project continuity.
+            enriched_event = PlanningRequestEvent(
+                task_id=task_id,
+                user_id=event.user_id,
+                project_id=event.project_id,
+                requirements=enriched_requirements,
+                task_type="CONVERSATION_UPDATE" if event.conversation_context else "INITIAL_PLANNING",
+                conversation_context=event.conversation_context,
+                timestamp=event.timestamp,
+            )
+
+            # Send progress update
+            self._producer.send_progress(
+                task_id=task_id,
+                stage="PROCESSING",
+                percent=20,
+                message="Great, I have all the information I need! Starting your trip plan...",
+            )
+
+            # Run the pipeline (skip pre-flight analysis on retry)
+            asyncio.run(self._run_pipeline_and_save(enriched_event, start_time))
+
+        except Exception as e:
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            error_msg = f"Worker error on clarification reply: {type(e).__name__}: {e}"
+            logger.exception("Worker failed for clarification reply: %s", task_id)
+            self._handle_failure(enriched_event if 'enriched_event' in dir() else
+                                 PlanningRequestEvent(
+                                     task_id=task_id, user_id=event.user_id,
+                                     project_id=event.project_id,
+                                     requirements=event.original_requirements,
+                                     task_type="INITIAL_PLANNING",
+                                     timestamp=event.timestamp,
+                                 ),
+                                 error_msg, processing_time_ms)
+        finally:
+            clear_trace_context()
+
+    async def _run_pipeline_and_save(
+        self, event: PlanningRequestEvent, start_time: float
+    ) -> None:
+        """Run pipeline and save — used by clarification reply handler.
+
+        Unlike _run_and_save, this skips the pre-flight analysis.
+        """
+        task_id = event.task_id
+        response = await self._run_pipeline(event)
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        if response.success and response.itinerary:
+            self._producer.send_progress(
+                task_id=task_id, stage="SAVING", percent=90,
+                message="Saving itinerary to database...",
+            )
+            itinerary_json = response.itinerary.model_dump_json()
+            tool_trace_list = [
+                {"tool": t.tool_name, "arguments": t.arguments,
+                 "latency_ms": t.latency_ms, "success": t.success}
+                for t in response.tool_trace
+            ]
+            cost_breakdown = self._build_cost_breakdown(response)
+            await self._store.save_result(
+                task_id=task_id, user_id=event.user_id, project_id=event.project_id,
+                status="COMPLETED", itinerary_json=itinerary_json,
+                tool_trace=tool_trace_list, processing_time_ms=processing_time_ms,
+                total_tokens=response.total_tokens,
+                total_cost_usd=response.total_cost_usd,
+                cost_breakdown=cost_breakdown,
+            )
+            self._producer.send_result(
+                task_id=task_id, user_id=event.user_id, project_id=event.project_id,
+                status="COMPLETED", itinerary_json=itinerary_json,
+                tool_trace=tool_trace_list, processing_time_ms=processing_time_ms,
+                total_tokens=response.total_tokens,
+                total_cost_usd=response.total_cost_usd,
+                cost_breakdown=cost_breakdown,
+            )
+            self._producer.send_progress(
+                task_id=task_id, stage="COMPLETED", percent=100,
+                message="Itinerary generated successfully!",
+            )
+            self._guard.mark_completed(task_id)
+        else:
+            error_msg = response.error or "Unknown error during generation"
+            await self._async_handle_failure(event, error_msg, processing_time_ms)
+
+    @staticmethod
+    def _build_cost_breakdown(response: AgentResponse) -> list[dict[str, Any]]:
+        """Extract serializable cost breakdown from agent response."""
+        return [
+            {
+                "label": c.label,
+                "model": c.model,
+                "input_tokens": c.input_tokens,
+                "output_tokens": c.output_tokens,
+                "cost_usd": c.cost_usd,
+            }
+            for c in response.llm_calls
+        ]
+
+    def _make_progress_callback(self, task_id: str) -> ProgressCallback:
+        """Create an async progress callback that bridges agent events to Kafka.
+
+        The agent service calls this callback at every decision point (tool calls,
+        thinking, stage changes). The callback maps event types to Kafka messages
+        with an interpolated progress percentage.
+
+        Args:
+            task_id: Task identifier for Kafka message key.
+
+        Returns:
+            Async callback: (event_type, data) -> None
+        """
+        # Mutable progress counter — updated as events flow through
+        progress_state = {"percent": 20}
+
+        _PERCENT_MAP = {
+            "stage_change": 5,   # bump +5
+            "thinking": 3,       # bump +3
+            "tool_start": 2,     # bump +2
+            "tool_result": 4,    # bump +4
+            "plan_outline": 5,   # bump +5
+            "cost_summary": 0,   # no bump — informational only
+            "clarification_needed": 0,
+        }
+
+        async def _callback(event_type: str, data: dict[str, Any]) -> None:
+            bump = _PERCENT_MAP.get(event_type, 2)
+            # Cap at 85 to leave room for SAVING and COMPLETED stages
+            progress_state["percent"] = min(85, progress_state["percent"] + bump)
+
+            message = data.get("message") or data.get("text") or event_type
+            if isinstance(message, str) and len(message) > 200:
+                message = message[:200] + "..."
+
+            try:
+                self._producer.send_agent_event(
+                    task_id=task_id,
+                    stage="PROCESSING",
+                    percent=progress_state["percent"],
+                    message=str(message),
+                    event_type=event_type,
+                    event_data=data,
+                )
+            except Exception:
+                logger.warning("Failed to send agent event: %s", event_type, exc_info=True)
+
+        return _callback
+
     async def _run_pipeline(
         self, event: PlanningRequestEvent
     ) -> AgentResponse:
@@ -278,6 +541,8 @@ class PlanningWorker:
         - Fallback response when all retries exhausted
         - Cost tracking per task
 
+        Phase 1 enhancement: Rich progress callback for real-time SSE streaming.
+
         Args:
             event: Planning request event with user requirements.
 
@@ -286,20 +551,17 @@ class PlanningWorker:
         """
         task_id = event.task_id
 
-        # Progress: RAG search phase
-        self._producer.send_progress(
-            task_id=task_id,
-            stage="RAG_SEARCH",
-            percent=30,
-            message="Selecting relevant tools and searching knowledge base...",
-        )
+        # Create rich progress callback for real-time agent events
+        progress_callback = self._make_progress_callback(task_id)
 
-        # Progress: Tool calling phase
-        self._producer.send_progress(
+        # Progress: Starting the pipeline
+        self._producer.send_agent_event(
             task_id=task_id,
-            stage="TOOL_CALLING",
-            percent=50,
-            message="Calling tools to gather real-time data...",
+            stage="PROCESSING",
+            percent=15,
+            message="Analyzing your travel request...",
+            event_type="stage_change",
+            event_data={"stage": "PROCESSING", "message": "Analyzing your travel request..."},
         )
 
         # Run agent through resilient pipeline (retry/timeout/fallback)
@@ -313,6 +575,8 @@ class PlanningWorker:
         response = await pipeline.execute(
             requirements=event.requirements,
             user_id=event.user_id,
+            conversation_context=event.conversation_context,
+            progress_callback=progress_callback,
         )
 
         # Log cost tracking summary
@@ -322,14 +586,6 @@ class PlanningWorker:
             cost_summary["total_tokens"],
             cost_summary["total_cost_usd"],
             cost_summary["requests"],
-        )
-
-        # Progress: Generating phase
-        self._producer.send_progress(
-            task_id=task_id,
-            stage="GENERATING",
-            percent=70,
-            message="Generating structured itinerary...",
         )
 
         return response

@@ -5,7 +5,8 @@ Uses Open-Meteo API (completely free, no API key required).
 https://open-meteo.com/
 
 Features:
-- 16-day forecast available
+- 16-day forecast available for future dates
+- Historical weather data via archive API for past dates
 - Hourly and daily data
 - Multiple weather variables
 - No rate limits for reasonable usage
@@ -22,7 +23,7 @@ Example:
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -30,8 +31,11 @@ from voyageai.tools.base import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
 
-# Open-Meteo API endpoint (free, no key needed)
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+# Open-Meteo API endpoints (free, no key needed)
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+# Keep backward compat
+OPEN_METEO_URL = OPEN_METEO_FORECAST_URL
 
 # WMO Weather interpretation codes
 # https://open-meteo.com/en/docs#weathervariables
@@ -164,19 +168,28 @@ class WeatherTool(BaseTool):
             if end < start:
                 return False, "End date must be after start date"
             
-            # Open-Meteo supports up to 16 days forecast
-            today = datetime.now()
-            max_date = today.replace(hour=0, minute=0, second=0, microsecond=0)
-            from datetime import timedelta
-            max_date += timedelta(days=16)
+            # Limit range to 30 days max
+            if (end - start).days > 30:
+                return False, "Date range cannot exceed 30 days"
             
-            if end > max_date:
-                return False, f"Forecast only available up to 16 days ahead ({max_date.strftime('%Y-%m-%d')})"
+            # Open-Meteo forecast supports up to 16 days ahead
+            # Open-Meteo archive supports historical dates back to 1940
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            max_forecast_date = today + timedelta(days=16)
+            
+            if end > max_forecast_date:
+                return False, f"Forecast only available up to 16 days ahead ({max_forecast_date.strftime('%Y-%m-%d')})"
             
             return True, ""
             
         except ValueError:
             return False, "Invalid date format. Use YYYY-MM-DD."
+    
+    def _is_past_date_range(self, start_date: str, end_date: str) -> bool:
+        """Check if the entire date range is in the past (needs archive API)."""
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        return end < today
     
     async def execute(
         self,
@@ -239,23 +252,44 @@ class WeatherTool(BaseTool):
             )
         
         try:
+            # Choose API endpoint based on whether dates are in the past
+            use_archive = self._is_past_date_range(start_date, end_date)
+            
+            if use_archive:
+                # Historical weather: use archive API (no precipitation_probability or UV)
+                api_url = OPEN_METEO_ARCHIVE_URL
+                daily_vars = [
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "weathercode",
+                    "sunrise",
+                    "sunset",
+                ]
+                logger.info(
+                    "Using archive API for past dates: %s to %s", start_date, end_date
+                )
+            else:
+                # Future weather: use forecast API
+                api_url = OPEN_METEO_FORECAST_URL
+                daily_vars = [
+                    "temperature_2m_max",
+                    "temperature_2m_min",
+                    "precipitation_probability_max",
+                    "weathercode",
+                    "uv_index_max",
+                    "sunrise",
+                    "sunset",
+                ]
+            
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    OPEN_METEO_URL,
+                    api_url,
                     params={
                         "latitude": latitude,
                         "longitude": longitude,
                         "start_date": start_date,
                         "end_date": end_date,
-                        "daily": ",".join([
-                            "temperature_2m_max",
-                            "temperature_2m_min",
-                            "precipitation_probability_max",
-                            "weathercode",
-                            "uv_index_max",
-                            "sunrise",
-                            "sunset"
-                        ]),
+                        "daily": ",".join(daily_vars),
                         "timezone": "auto",
                     },
                     timeout=self.timeout
@@ -272,28 +306,35 @@ class WeatherTool(BaseTool):
                 sunrise = daily.get("sunrise", [None])[i]
                 sunset = daily.get("sunset", [None])[i]
                 
-                forecast.append({
+                entry = {
                     "date": date,
                     "temp_max_c": daily.get("temperature_2m_max", [None])[i],
                     "temp_min_c": daily.get("temperature_2m_min", [None])[i],
-                    "precipitation_chance": daily.get("precipitation_probability_max", [None])[i],
                     "condition": self._weather_code_to_text(
                         daily.get("weathercode", [0])[i] or 0
                     ),
-                    "uv_index": daily.get("uv_index_max", [None])[i],
                     "sunrise": sunrise.split("T")[1][:5] if sunrise else None,
                     "sunset": sunset.split("T")[1][:5] if sunset else None,
-                })
+                }
+                
+                # These fields are only available in the forecast API
+                if not use_archive:
+                    entry["precipitation_chance"] = daily.get("precipitation_probability_max", [None])[i]
+                    entry["uv_index"] = daily.get("uv_index_max", [None])[i]
+                
+                forecast.append(entry)
             
+            source = "archive (historical)" if use_archive else "forecast"
             output = {
                 "location": {"latitude": latitude, "longitude": longitude},
                 "timezone": data.get("timezone", "UTC"),
+                "data_source": source,
                 "forecast": forecast
             }
             
             logger.info(
-                f"Weather forecast for ({latitude}, {longitude}): "
-                f"{len(forecast)} days retrieved"
+                "Weather %s for (%s, %s): %d days retrieved",
+                source, latitude, longitude, len(forecast)
             )
             
             return ToolResult(

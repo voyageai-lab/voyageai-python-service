@@ -2,12 +2,13 @@
 VoyageAI Tools Package
 
 This package contains real tool implementations for the AI agent:
-- WeatherTool: Weather forecast using Open-Meteo API
+- WeatherTool: Weather forecast using Open-Meteo API (with archive for past dates)
 - CurrencyTool: Currency conversion using Frankfurter API
 - TimeZoneTool: Timezone conversion using Python zoneinfo
 - DistanceTool: Distance calculation using Haversine formula
 - GeocodeTool: Geocoding using OpenStreetMap Nominatim
 - HolidayTool: Public holidays using Nager.Date API
+- WebSearchTool: Web search using DuckDuckGo (no API key)
 
 Module 10 additions:
 - RateLimiter: Token bucket rate limiting for tool execution
@@ -25,6 +26,7 @@ from voyageai.tools.rate_limiter import RateLimitExceeded, RateLimiter, rate_lim
 from voyageai.tools.registry import ToolRegistry, tool_registry
 from voyageai.tools.timezone import TimeZoneTool
 from voyageai.tools.weather import WeatherTool
+from voyageai.tools.websearch import WebSearchTool
 
 __all__ = [
     "BaseTool",
@@ -37,6 +39,7 @@ __all__ = [
     "TimeZoneTool",
     "DistanceTool",
     "HolidayTool",
+    "WebSearchTool",
     # Rate limiting (Module 10)
     "RateLimiter",
     "RateLimitExceeded",

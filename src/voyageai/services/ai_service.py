@@ -21,15 +21,35 @@ logger = logging.getLogger(__name__)
 
 def make_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """
-    Recursively transform schema for OpenAI's strict structured output mode:
-    1. Add 'additionalProperties: false' to all objects
-    2. Ensure all properties are in 'required' array
-    3. Convert optional fields (anyOf with null) to required with null type
+    Recursively transform schema for OpenAI's strict structured output mode.
+    
+    OpenAI's strict mode only supports a limited JSON Schema subset:
+      Supported: type, description, enum, const, properties, required, items,
+                 anyOf, $ref, $defs, additionalProperties (must be false)
+      NOT supported: pattern, format, minimum, maximum, exclusiveMinimum,
+                     exclusiveMaximum, minLength, maxLength, minItems, maxItems,
+                     minProperties, maxProperties, allOf, oneOf, not, if/then/else
+    
+    This function:
+    1. Adds 'additionalProperties: false' to all objects
+    2. Ensures all properties are in 'required' array
+    3. Strips unsupported keywords that cause unpredictable behavior
     """
     if not isinstance(schema, dict):
         return schema
 
     result = schema.copy()
+
+    # Strip keywords unsupported by OpenAI strict mode
+    _UNSUPPORTED_KEYWORDS = {
+        "pattern", "format",
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+        "minLength", "maxLength",
+        "minItems", "maxItems",
+        "minProperties", "maxProperties",
+    }
+    for keyword in _UNSUPPORTED_KEYWORDS:
+        result.pop(keyword, None)
 
     # Add additionalProperties: false for object types
     if result.get("type") == "object":

@@ -141,6 +141,68 @@ class KafkaProgressProducer:
             logger.error("Failed to send progress event: task_id=%s, error=%s", task_id, e)
             raise
 
+    def send_agent_event(
+        self,
+        task_id: str,
+        stage: str,
+        percent: int,
+        message: str,
+        event_type: str,
+        event_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Send a rich agent event to the planning.progress topic.
+
+        This extends the basic progress event with structured event payloads
+        for real-time agent visibility (Phase 1 SSE streaming).
+
+        Event types:
+            thinking     - Agent reasoning text
+            tool_start   - Tool call initiated
+            tool_result  - Tool call completed
+            stage_change - Pipeline stage transition
+            plan_outline - Plan summary before full generation
+            clarification_needed - Questions for the user (Phase 2)
+
+        Args:
+            task_id: Task identifier (used as partition key).
+            stage: Current processing stage.
+            percent: Progress percentage (0-100).
+            message: Human-readable status message.
+            event_type: Granular event subtype.
+            event_data: Structured payload dict (serialized as JSON).
+        """
+        event = PlanningProgressEvent(
+            task_id=task_id,
+            stage=stage,
+            percent=percent,
+            message=message,
+            event_type=event_type,
+            event_data=event_data,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+        producer = self._ensure_producer()
+        try:
+            producer.produce(
+                topic=self._progress_topic,
+                key=task_id.encode("utf-8"),
+                value=self._serialize_event(event),
+                callback=self._delivery_callback,
+            )
+            producer.poll(0)
+            logger.info(
+                "Agent event queued: task_id=%s, event_type=%s, stage=%s",
+                task_id,
+                event_type,
+                stage,
+            )
+        except KafkaException as e:
+            logger.error(
+                "Failed to send agent event: task_id=%s, event_type=%s, error=%s",
+                task_id, event_type, e,
+            )
+            raise
+
     def send_result(
         self,
         task_id: str,
@@ -152,6 +214,8 @@ class KafkaProgressProducer:
         error: str | None = None,
         processing_time_ms: int | None = None,
         total_tokens: int | None = None,
+        total_cost_usd: float | None = None,
+        cost_breakdown: list[dict[str, Any]] | None = None,
     ) -> None:
         """Send a result event to the planning.result topic.
 
@@ -165,6 +229,8 @@ class KafkaProgressProducer:
             error: Error message (on failure).
             processing_time_ms: Total processing duration.
             total_tokens: Total LLM tokens consumed.
+            total_cost_usd: Total estimated cost in USD.
+            cost_breakdown: Per-LLM-call cost breakdown.
         """
         event = PlanningResultEvent(
             task_id=task_id,
@@ -176,6 +242,8 @@ class KafkaProgressProducer:
             error=error,
             processing_time_ms=processing_time_ms,
             total_tokens=total_tokens,
+            total_cost_usd=total_cost_usd,
+            cost_breakdown=cost_breakdown,
             timestamp=datetime.now(timezone.utc),
         )
 

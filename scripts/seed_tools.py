@@ -338,6 +338,286 @@ TOOL_DEFINITIONS: list[ToolMetadata] = [
     ),
     
     # =========================================================================
+    # Web Search Tool
+    # =========================================================================
+    ToolMetadata(
+        name="web_search",
+        description=(
+            "Search the web for up-to-date travel information, guides, tips, "
+            "and advisories. Can target specific intents like destination info, "
+            "things to do, travel advisory, local events, restaurants, or transportation."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Max results (default 5)"},
+                "intent": {"type": "string", "description": "Search intent: destination_info, things_to_do, travel_advisory, local_events, restaurants, transportation"},
+            },
+            "required": ["query"],
+        },
+        example_queries=[
+            "What are the top things to do in Kyoto?",
+            "Travel advisory for Southeast Asia",
+            "Best time to visit Iceland",
+            "Local events happening in Barcelona in May",
+            "Transportation options in Tokyo",
+            "Safety tips for traveling to Mexico",
+            "Hidden gems in Portugal",
+            "Is it safe to travel to Turkey right now?",
+            "Best neighborhoods to stay in Rome",
+            "Local food guide for Bangkok",
+        ],
+        rate_limit_per_minute=30,
+        timeout_seconds=10,
+        requires_api_key=False,
+        is_enabled=True,
+        priority=8,
+    ),
+
+    # =========================================================================
+    # Attractions Tool
+    # =========================================================================
+    ToolMetadata(
+        name="search_attractions",
+        description=(
+            "Search for tourist attractions, landmarks, museums, and points of interest "
+            "near a specific location. Uses OpenStreetMap data. Free, no API key required."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number", "description": "Center latitude"},
+                "longitude": {"type": "number", "description": "Center longitude"},
+                "radius": {"type": "integer", "description": "Radius in meters (default 5000)"},
+                "categories": {"type": "string", "description": "Categories: cultural, historic, natural, museums, etc."},
+                "limit": {"type": "integer", "description": "Max results (default 10)"},
+            },
+            "required": ["latitude", "longitude"],
+        },
+        example_queries=[
+            "Find museums near the Louvre in Paris",
+            "Tourist attractions in central Tokyo",
+            "Historic landmarks in Rome within walking distance",
+            "Nature spots near Reykjavik",
+            "What attractions are near my hotel in Barcelona?",
+            "Cultural sites in Kyoto",
+            "Points of interest near the Colosseum",
+            "Beaches near Cancun",
+        ],
+        rate_limit_per_minute=30,
+        timeout_seconds=15,
+        requires_api_key=False,
+        is_enabled=True,
+        priority=7,
+    ),
+
+    # =========================================================================
+    # Restaurant Search Tool
+    # =========================================================================
+    ToolMetadata(
+        name="search_restaurants",
+        description=(
+            "Search for restaurants, cafes, and food establishments near a location "
+            "using OpenStreetMap data. Can filter by cuisine type. Free, no API key."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number", "description": "Center latitude"},
+                "longitude": {"type": "number", "description": "Center longitude"},
+                "radius": {"type": "integer", "description": "Radius in meters (default 1000)"},
+                "cuisine": {"type": "string", "description": "Cuisine filter (e.g., 'japanese,seafood')"},
+                "limit": {"type": "integer", "description": "Max results (default 10)"},
+            },
+            "required": ["latitude", "longitude"],
+        },
+        example_queries=[
+            "Restaurants near Shibuya station",
+            "Best ramen shops in Shinjuku",
+            "Italian restaurants near the Trevi Fountain",
+            "Seafood restaurants near the harbor",
+            "Where to eat near my hotel in Paris",
+            "Cafes near Central Park",
+            "Thai food near Khao San Road",
+            "Vegetarian restaurants in Berlin",
+        ],
+        rate_limit_per_minute=30,
+        timeout_seconds=15,
+        requires_api_key=False,
+        is_enabled=True,
+        priority=7,
+    ),
+
+    # =========================================================================
+    # Foursquare Places Search Tool
+    # =========================================================================
+    ToolMetadata(
+        name="search_places_foursquare",
+        description=(
+            "Search for places (restaurants, hotels, attractions, museums, cafes, bars, "
+            "shops, landmarks) using Foursquare's 100M+ POI database with ratings. "
+            "Requires either coordinates or a location name."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "latitude": {"type": "number", "description": "Center latitude"},
+                "longitude": {"type": "number", "description": "Center longitude"},
+                "near": {"type": "string", "description": "Location name (alternative to lat/lon)"},
+                "categories": {"type": "string", "description": "Category filter"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
+            },
+            "required": ["query"],
+        },
+        example_queries=[
+            "Best rated restaurants near Times Square",
+            "Highly rated sushi in Tokyo",
+            "Top hotels near the Eiffel Tower",
+            "Popular bars in downtown Austin",
+            "Best coffee shops in Seattle",
+            "Recommended museums in London",
+            "Where to shop in Milan",
+            "Nightlife in Barcelona",
+            "Rated attractions near me",
+            "Best pizza places in New York",
+        ],
+        rate_limit_per_minute=60,
+        timeout_seconds=10,
+        requires_api_key=True,
+        is_enabled=True,
+        priority=8,
+    ),
+
+    # =========================================================================
+    # Flight Search Tool
+    # =========================================================================
+    ToolMetadata(
+        name="search_flights",
+        description=(
+            "Search for flight offers between airports using IATA codes. "
+            "Returns prices, airlines, duration, and stops. "
+            "Supports one-way and round-trip searches."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "origin": {"type": "string", "description": "Departure IATA code (e.g., SEA)"},
+                "destination": {"type": "string", "description": "Arrival IATA code (e.g., NRT)"},
+                "departure_date": {"type": "string", "description": "Date YYYY-MM-DD"},
+                "return_date": {"type": "string", "description": "Return date YYYY-MM-DD"},
+                "adults": {"type": "integer", "description": "Number of passengers"},
+            },
+            "required": ["origin", "destination", "departure_date"],
+        },
+        example_queries=[
+            "Find flights from Seattle to Tokyo in May",
+            "Cheapest flights from JFK to London",
+            "How much is a flight from LAX to Paris?",
+            "Round trip flights from SFO to NRT",
+            "Flight prices from Chicago to Rome",
+            "Direct flights to Hawaii from Seattle",
+            "Business class flights to Singapore",
+            "Compare flight prices for my trip",
+            "When is the cheapest time to fly to Japan?",
+            "Book a flight from New York to Barcelona",
+        ],
+        rate_limit_per_minute=30,
+        timeout_seconds=15,
+        requires_api_key=True,
+        is_enabled=True,
+        priority=8,
+    ),
+
+    # =========================================================================
+    # Google Maps Search Places Tool (via MCP)
+    # =========================================================================
+    ToolMetadata(
+        name="googlemaps__search_places",
+        description=(
+            "Search for places (restaurants, hotels, attractions, museums, cafes, "
+            "bars, parks, landmarks) using Google Maps via MCP. Returns names, addresses, "
+            "ratings, price levels, and opening hours. Very accurate global data."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "latitude": {"type": "number", "description": "Bias center latitude"},
+                "longitude": {"type": "number", "description": "Bias center longitude"},
+                "radius": {"type": "integer", "description": "Bias radius in meters (default 5000)"},
+                "type": {"type": "string", "description": "Place type filter (restaurant, museum, etc.)"},
+                "limit": {"type": "integer", "description": "Max results (default 5)"},
+            },
+            "required": ["query"],
+        },
+        example_queries=[
+            "Find the best restaurants in Shinjuku Tokyo",
+            "Top rated hotels near the Eiffel Tower",
+            "Museums to visit in London",
+            "Cafes near Central Park New York",
+            "Tourist attractions in Barcelona with ratings",
+            "Best pizza places in Rome",
+            "Highly rated sushi restaurants in Osaka",
+            "Parks and gardens in Kyoto",
+            "Shopping malls near my hotel in Dubai",
+            "Nightlife spots in Berlin with reviews",
+        ],
+        rate_limit_per_minute=60,
+        timeout_seconds=10,
+        requires_api_key=True,
+        is_enabled=True,
+        priority=9,
+    ),
+
+    # =========================================================================
+    # Google Maps Directions Tool (via MCP)
+    # =========================================================================
+    ToolMetadata(
+        name="googlemaps__get_directions",
+        description=(
+            "Get directions between two locations via Google Maps (MCP). "
+            "Returns distance, duration, and route steps. "
+            "Supports driving, walking, bicycling, and public transit."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "origin": {"type": "string", "description": "Start address or lat,lng"},
+                "destination": {"type": "string", "description": "End address or lat,lng"},
+                "mode": {"type": "string", "description": "driving, walking, bicycling, transit"},
+                "departure_time": {"type": "string", "description": "For transit: 'now' or ISO datetime"},
+            },
+            "required": ["origin", "destination"],
+        },
+        example_queries=[
+            "How do I get from Shinjuku to Asakusa by train?",
+            "Directions from the Louvre to the Eiffel Tower walking",
+            "Transit directions from JFK airport to Manhattan",
+            "Drive time from Los Angeles to San Francisco",
+            "Walking directions between Colosseum and Trevi Fountain",
+            "How long is the train ride from Tokyo to Kyoto?",
+            "Public transit from my hotel to the airport",
+            "Best route from downtown to the beach",
+            "Driving directions in Iceland ring road",
+            "How to get from one attraction to another",
+        ],
+        rate_limit_per_minute=60,
+        timeout_seconds=10,
+        requires_api_key=True,
+        is_enabled=True,
+        priority=8,
+    ),
+
+    # =========================================================================
     # Holiday Tool
     # =========================================================================
     ToolMetadata(

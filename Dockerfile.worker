@@ -23,8 +23,12 @@ RUN groupadd -r voyageai && useradd -r -g voyageai voyageai
 
 COPY --from=builder /install /usr/local
 COPY src ./src
+COPY scripts ./scripts
+
+# Create data dir for ChromaDB (Tool-RAG) with correct permissions
+RUN mkdir -p /app/data/chroma && chown -R voyageai:voyageai /app/data
 
 USER voyageai
 
-# Run the Kafka worker process
-CMD ["python", "-m", "voyageai.kafka.run_worker"]
+# Seed Tool-RAG on startup, then run the Kafka worker
+CMD ["sh", "-c", "python scripts/seed_tools.py && python -m voyageai.kafka.run_worker"]

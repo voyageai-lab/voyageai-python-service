@@ -49,7 +49,34 @@ class MongoDBResultStore:
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
-        """Lazy-initialize MongoDB connection and create indexes."""
+        """Lazy-initialize MongoDB connection and create indexes.
+
+        Motor's AsyncIOMotorClient is bound to the event loop that was
+        running when it was created. If the event loop changes (e.g.
+        because asyncio.run() was called again), we must re-create the
+        client to avoid 'Event loop is closed' errors.
+        """
+        import asyncio
+
+        current_loop = asyncio.get_running_loop()
+
+        if self._initialized and self._client is not None:
+            # Check if the client's event loop is still the current one
+            try:
+                client_loop = self._client.get_io_loop()
+                if client_loop is current_loop and not client_loop.is_closed():
+                    return  # Still valid
+            except Exception:
+                pass
+            # Stale client — close and re-create
+            logger.info("MongoDB client bound to stale event loop, re-initializing...")
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+            self._initialized = False
+
         if self._initialized:
             return
 
@@ -83,6 +110,8 @@ class MongoDBResultStore:
         error: str | None = None,
         processing_time_ms: int | None = None,
         total_tokens: int | None = None,
+        total_cost_usd: float | None = None,
+        cost_breakdown: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Save a planning result to MongoDB.
 
@@ -100,6 +129,8 @@ class MongoDBResultStore:
             error: Error message (on failure).
             processing_time_ms: Total processing duration.
             total_tokens: Total LLM tokens consumed.
+            total_cost_usd: Total estimated cost in USD.
+            cost_breakdown: Per-LLM-call cost breakdown.
 
         Returns:
             True if document was inserted/updated, False on error.
@@ -116,6 +147,8 @@ class MongoDBResultStore:
             "error": error,
             "processing_time_ms": processing_time_ms,
             "total_tokens": total_tokens,
+            "total_cost_usd": total_cost_usd,
+            "cost_breakdown": cost_breakdown,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }

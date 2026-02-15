@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     # OpenAI Configuration
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # Use a reasoning model for the final structured output call.
+    # gpt-4o-mini struggles with long structured JSON (6+ day itineraries).
+    # o4-mini excels: built-in reasoning plans the full structure before generating,
+    # 100K output token limit eliminates truncation, and costs 3-5x less than gpt-4o.
+    # Tool calling stays on gpt-4o-mini (cheapest, fast, sufficient for tool selection).
+    openai_final_model: str = "o4-mini"
 
     # Service Configuration
     service_name: str = "voyageai-python-service"
@@ -23,7 +29,7 @@ class Settings(BaseSettings):
     # AI Generation Settings
     max_retries: int = 3
     timeout_seconds: int = 60
-    max_tokens: int = 4000
+    max_tokens: int = 16000
     temperature: float = 0.7
 
     # Kafka Configuration (Module 11)
@@ -50,6 +56,16 @@ class Settings(BaseSettings):
 
     # Worker Configuration (Module 12)
     worker_pipeline_timeout_seconds: int = 120
+
+    # Foursquare Places API (free tier, no credit card)
+    foursquare_api_key: str = ""
+
+    # Amadeus Flight/Hotel API (free test environment)
+    amadeus_api_key: str = ""
+    amadeus_api_secret: str = ""
+
+    # Google Maps API (Places, Directions, Geocoding — $200/mo free credit)
+    google_maps_api_key: str = ""
 
 
 settings = Settings()

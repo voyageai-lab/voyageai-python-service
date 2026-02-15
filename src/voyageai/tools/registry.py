@@ -27,14 +27,21 @@ Example:
 import logging
 from typing import Any
 
+from voyageai.tools.attractions import AttractionsTool
 from voyageai.tools.base import BaseTool, ToolResult
 from voyageai.tools.currency import CurrencyTool
 from voyageai.tools.distance import DistanceTool
+from voyageai.tools.flight_search import FlightSearchTool
+from voyageai.tools.foursquare_search import FoursquareSearchTool
+# Google Maps tools are now served via MCP server (see mcp/google_maps_server.py)
+# They are discovered and registered dynamically at worker startup.
 from voyageai.tools.geocode import GeocodeTool
 from voyageai.tools.holiday import HolidayTool
 from voyageai.tools.rate_limiter import RateLimitExceeded, RateLimiter, rate_limiter
+from voyageai.tools.restaurant_search import RestaurantSearchTool
 from voyageai.tools.timezone import TimeZoneTool
 from voyageai.tools.weather import WeatherTool
+from voyageai.tools.websearch import WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +235,16 @@ def create_default_registry() -> ToolRegistry:
     registry.register(TimeZoneTool())
     registry.register(DistanceTool())
     registry.register(HolidayTool())
+    registry.register(WebSearchTool())
+    # Phase 3: New tools for richer itinerary data
+    registry.register(AttractionsTool())
+    registry.register(RestaurantSearchTool())
+    # Foursquare Places API (rich POI data; requires FOURSQUARE_API_KEY)
+    registry.register(FoursquareSearchTool())
+    # Amadeus Flight Search (requires AMADEUS_API_KEY + AMADEUS_API_SECRET)
+    registry.register(FlightSearchTool())
+    # Google Maps tools are registered dynamically via MCP at worker startup.
+    # See: voyageai/mcp/google_maps_server.py + run_worker.py
     
     logger.info(f"Initialized tool registry with {len(registry.list_tools())} tools")
     

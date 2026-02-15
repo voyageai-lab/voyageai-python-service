@@ -27,7 +27,7 @@ from tenacity import (
 )
 
 from voyageai.config import settings
-from voyageai.services.agent_service import AgentResponse, AgentService
+from voyageai.services.agent_service import AgentResponse, AgentService, ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,8 @@ class ResilientAgentPipeline:
         self,
         requirements: str,
         user_id: str | None = None,
+        conversation_context: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentResponse:
         """Execute the agent pipeline with full resilience stack.
 
@@ -141,13 +143,16 @@ class ResilientAgentPipeline:
         Args:
             requirements: User's travel planning requirements.
             user_id: User ID for rate limiting.
+            conversation_context: Previous conversation history for follow-ups.
 
         Returns:
             AgentResponse (either from agent or fallback).
         """
         try:
             async with asyncio.timeout(self._timeout):
-                return await self._execute_with_retry(requirements, user_id)
+                return await self._execute_with_retry(
+                    requirements, user_id, conversation_context, progress_callback
+                )
         except TimeoutError:
             logger.error(
                 "Pipeline timeout after %ds for user=%s",
@@ -172,6 +177,8 @@ class ResilientAgentPipeline:
         self,
         requirements: str,
         user_id: str | None,
+        conversation_context: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> AgentResponse:
         """Execute agent with tenacity retry logic.
 
@@ -201,8 +208,10 @@ class ResilientAgentPipeline:
             response = await self._agent.generate_with_tools(
                 requirements=requirements,
                 use_tool_rag=True,
-                tool_rag_top_k=4,
+                tool_rag_top_k=8,
                 user_id=user_id,
+                conversation_context=conversation_context,
+                progress_callback=progress_callback,
             )
 
             # Track cost

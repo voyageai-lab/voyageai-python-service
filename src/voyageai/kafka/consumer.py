@@ -22,7 +22,7 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError, KafkaException
 
 from voyageai.config import settings
-from voyageai.kafka.schemas import PlanningRequestEvent
+from voyageai.kafka.schemas import ClarificationReplyEvent, PlanningRequestEvent
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +46,17 @@ class KafkaRequestConsumer:
     def __init__(
         self,
         handler: Callable[[PlanningRequestEvent], None],
+        clarification_handler: Callable[[ClarificationReplyEvent], None] | None = None,
         bootstrap_servers: str | None = None,
         group_id: str | None = None,
         topic: str | None = None,
     ) -> None:
         self._handler = handler
+        self._clarification_handler = clarification_handler
         self._bootstrap_servers = bootstrap_servers or settings.kafka_bootstrap_servers
         self._group_id = group_id or settings.kafka_group_id
         self._topic = topic or settings.kafka_topic_planning_request
+        self._clarification_topic = "planning.clarification.reply"
         self._shutdown_event = threading.Event()
         self._consumer: Consumer | None = None
         self._thread: threading.Thread | None = None
@@ -69,7 +72,10 @@ class KafkaRequestConsumer:
             "session.timeout.ms": settings.kafka_session_timeout_ms,
         }
         consumer = Consumer(config)
-        consumer.subscribe([self._topic])
+        topics = [self._topic]
+        if self._clarification_handler:
+            topics.append(self._clarification_topic)
+        consumer.subscribe(topics)
         logger.info(
             "Kafka consumer created: servers=%s, group=%s, topic=%s",
             self._bootstrap_servers,
@@ -88,6 +94,15 @@ class KafkaRequestConsumer:
             return PlanningRequestEvent.model_validate(data)
         except (json.JSONDecodeError, Exception) as e:
             logger.error("Failed to deserialize message: %s", e)
+            return None
+
+    def _deserialize_clarification(self, raw_value: bytes) -> ClarificationReplyEvent | None:
+        """Deserialize JSON bytes into a ClarificationReplyEvent."""
+        try:
+            data = json.loads(raw_value)
+            return ClarificationReplyEvent.model_validate(data)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Failed to deserialize clarification reply: %s", e)
             return None
 
     def start(self) -> None:
@@ -118,27 +133,50 @@ class KafkaRequestConsumer:
                         logger.error("Consumer error: %s", msg.error())
                     continue
 
-                # Deserialize and dispatch
-                event = self._deserialize_message(msg.value())
-                if event is None:
-                    logger.warning(
-                        "Skipping undeserializable message at offset %d",
-                        msg.offset(),
+                # Route based on topic
+                topic = msg.topic()
+                if topic == self._clarification_topic and self._clarification_handler:
+                    # Clarification reply event
+                    reply_event = self._deserialize_clarification(msg.value())
+                    if reply_event is None:
+                        logger.warning(
+                            "Skipping undeserializable clarification at offset %d",
+                            msg.offset(),
+                        )
+                        continue
+                    logger.info(
+                        "Received clarification reply: task_id=%s",
+                        reply_event.task_id,
                     )
-                    continue
+                    try:
+                        self._clarification_handler(reply_event)
+                    except Exception:
+                        logger.exception(
+                            "Clarification handler failed for task_id=%s",
+                            reply_event.task_id,
+                        )
+                else:
+                    # Planning request event
+                    event = self._deserialize_message(msg.value())
+                    if event is None:
+                        logger.warning(
+                            "Skipping undeserializable message at offset %d",
+                            msg.offset(),
+                        )
+                        continue
 
-                logger.info(
-                    "Received planning request: task_id=%s, user_id=%s",
-                    event.task_id,
-                    event.user_id,
-                )
-
-                try:
-                    self._handler(event)
-                except Exception:
-                    logger.exception(
-                        "Handler failed for task_id=%s", event.task_id
+                    logger.info(
+                        "Received planning request: task_id=%s, user_id=%s",
+                        event.task_id,
+                        event.user_id,
                     )
+
+                    try:
+                        self._handler(event)
+                    except Exception:
+                        logger.exception(
+                            "Handler failed for task_id=%s", event.task_id
+                        )
         except KafkaException as e:
             logger.error("Kafka consumer error: %s", e)
             raise
