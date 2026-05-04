@@ -118,6 +118,19 @@ When generating the final itinerary:
 - Use real data from tool results (attractions, restaurants, flights, etc.)
 - Include sunrise/sunset times for photography opportunities
 
+TRAVEL TIPS & REMINDERS (IMPORTANT):
+In addition to the simple "tips" array, populate "travel_tips" with structured tips:
+Each travel_tip has: {{"category": "booking|closure|dress_code|safety|logistics|budget|cultural", "message": "...", "priority": "high|medium|low", "applies_to": "act-day1-001 or null", "advance_days": number or null}}
+
+You MUST include structured tips for:
+- Booking deadlines: If a place requires advance booking, specify how many days ahead (advance_days field). Category: "booking", priority: "high".
+- Closure days: If a museum, temple, or attraction is closed on certain days (e.g., Mondays). Category: "closure", priority: "high".
+- Dress codes: If a temple, church, or venue requires specific clothing (long sleeves, no shorts, head covering). Category: "dress_code", priority: "high".
+- Safety reminders: Scam warnings, health advisories, altitude sickness, water safety. Category: "safety".
+- Logistics: Early arrival tips, last entry times, peak hours to avoid. Category: "logistics".
+- Budget tips: Free entry days, combo ticket deals, money-saving strategies. Category: "budget".
+- Cultural etiquette: Tipping customs, shoe removal, photography rules. Category: "cultural".
+
 SOURCE LINKS & WEBSITE URLS (IMPORTANT):
 For each activity in the final itinerary, you MUST populate:
 - "website_url": The official website URL for the attraction/restaurant if found in tool results (e.g., from Foursquare, OpenStreetMap, or web search). Set to null if not available.

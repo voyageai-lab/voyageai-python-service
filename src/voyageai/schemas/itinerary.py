@@ -95,6 +95,35 @@ class ItineraryMetadata(BaseModel):
     interests: list[str] = Field(default_factory=list, description="User interests")
 
 
+class TravelTip(BaseModel):
+    """Structured travel tip with category and priority."""
+
+    model_config = {"extra": "allow"}
+
+    category: str = Field(
+        ...,
+        description=(
+            "Tip category: 'booking' (advance reservation needed), "
+            "'closure' (closed days/hours), 'dress_code' (clothing requirements), "
+            "'safety' (health/safety warnings), 'logistics' (transport/timing), "
+            "'budget' (money-saving), 'cultural' (local customs/etiquette)"
+        ),
+    )
+    message: str = Field(..., description="The tip text")
+    priority: str = Field(
+        default="medium",
+        description="Importance: 'high' (must-know), 'medium' (good-to-know), 'low' (nice-to-know)",
+    )
+    applies_to: str | None = Field(
+        default=None,
+        description="Activity ID or day reference this tip applies to (e.g., 'act-day1-001' or 'day-2')",
+    )
+    advance_days: int | None = Field(
+        default=None,
+        description="For booking tips: how many days in advance to book",
+    )
+
+
 class StructuredItinerary(BaseModel):
     """Complete structured itinerary."""
 
@@ -103,3 +132,7 @@ class StructuredItinerary(BaseModel):
     metadata: ItineraryMetadata
     days: list[DailyItinerary] = Field(..., min_length=1)
     tips: list[str] = Field(default_factory=list, description="General travel tips")
+    travel_tips: list[TravelTip] = Field(
+        default_factory=list,
+        description="Structured travel tips with categories, priorities, and booking reminders",
+    )
