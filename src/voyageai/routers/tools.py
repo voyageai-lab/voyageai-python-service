@@ -24,7 +24,9 @@ from pydantic import BaseModel, Field
 from voyageai.rag.tool_rag import tool_rag
 from voyageai.schemas.tool import ToolCallRequest, ToolCallResponse
 from voyageai.schemas.tool_metadata import ToolMetadata, ToolSelectionResult
-from voyageai.services.agent_service import agent_service
+from voyageai.services.responses_agent_service import ResponsesAgentService
+
+_agent_service = ResponsesAgentService()
 from voyageai.tools.rate_limiter import rate_limiter
 from voyageai.tools.registry import tool_registry
 
@@ -89,7 +91,7 @@ async def invoke_tool(request: ToolCallRequest) -> ToolCallResponse:
             "arguments": {"location": "Tokyo, Japan"}
         }
     """
-    trace = await agent_service.call_single_tool(
+    trace = await _agent_service.call_single_tool(
         request.tool_name,
         request.arguments,
     )

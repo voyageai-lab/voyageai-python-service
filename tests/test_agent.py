@@ -109,7 +109,7 @@ class TestAgentServiceMocked:
         
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
-        mock_response.usage = MagicMock(total_tokens=100)
+        mock_response.usage = MagicMock(total_tokens=100, prompt_tokens=60, completion_tokens=40, completion_tokens_details=None)
         
         # Second response (after tools) - no more tool calls
         mock_message2 = MagicMock()
@@ -118,10 +118,11 @@ class TestAgentServiceMocked:
         
         mock_choice2 = MagicMock()
         mock_choice2.message = mock_message2
+        mock_choice2.finish_reason = "stop"
         
         mock_response2 = MagicMock()
         mock_response2.choices = [mock_choice2]
-        mock_response2.usage = MagicMock(total_tokens=150)
+        mock_response2.usage = MagicMock(total_tokens=150, prompt_tokens=90, completion_tokens=60, completion_tokens_details=None)
         
         # Final structured response
         mock_final_message = MagicMock()
@@ -129,8 +130,8 @@ class TestAgentServiceMocked:
             "metadata": {
                 "destination": "Tokyo",
                 "start_date": "2026-01-10",
-                "end_date": "2026-01-12",
-                "total_days": 3,
+                "end_date": "2026-01-10",
+                "total_days": 1,
                 "budget": "$2000",
                 "interests": ["culture"]
             },
@@ -162,13 +163,22 @@ class TestAgentServiceMocked:
         
         mock_final_response = MagicMock()
         mock_final_response.choices = [mock_final_choice]
-        mock_final_response.usage = MagicMock(total_tokens=200)
+        mock_final_response.usage = MagicMock(total_tokens=200, prompt_tokens=100, completion_tokens=100, completion_tokens_details=None)
+
+        # Plan outline response (consumed by _generate_plan_outline)
+        mock_outline_message = MagicMock()
+        mock_outline_message.content = '{"summary": "3-day Tokyo trip", "daily_themes": []}'
+        mock_outline_choice = MagicMock()
+        mock_outline_choice.message = mock_outline_message
+        mock_outline_response = MagicMock()
+        mock_outline_response.choices = [mock_outline_choice]
+        mock_outline_response.usage = MagicMock(total_tokens=50, prompt_tokens=30, completion_tokens=20, completion_tokens_details=None)
         
         with patch.object(
             agent.client.chat.completions,
             'create',
             new_callable=AsyncMock,
-            side_effect=[mock_response, mock_response2, mock_final_response]
+            side_effect=[mock_response, mock_response2, mock_outline_response, mock_final_response]
         ):
             response = await agent.generate_with_tools("Plan a trip to Tokyo")
         
