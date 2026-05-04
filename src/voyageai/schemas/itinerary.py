@@ -70,6 +70,10 @@ class Activity(BaseModel):
     )
 
 
+AlternativeActivity = Activity
+"""Alias for Activity used in alternative schedules (same structure)."""
+
+
 class DailyItinerary(BaseModel):
     """One day's schedule."""
 
@@ -79,6 +83,10 @@ class DailyItinerary(BaseModel):
     date: str = Field(..., description="Date in YYYY-MM-DD format")
     theme: str = Field(..., description="Theme for the day")
     activities: list[Activity] = Field(..., min_length=1, description="List of activities")
+    alternatives: list[list[Activity]] = Field(
+        default_factory=list,
+        description="Alternative full-day schedules — each entry is a complete list of activities for the day",
+    )
     summary: str | None = Field(default=None, description="Optional day summary")
 
 
