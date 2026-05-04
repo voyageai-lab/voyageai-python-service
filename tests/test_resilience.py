@@ -25,7 +25,7 @@ from voyageai.logging_config import (
     set_trace_context,
 )
 from voyageai.resilience import CostTracker, ResilientAgentPipeline
-from voyageai.services.agent_service import AgentResponse
+from voyageai.services.agent_types import AgentResponse
 
 
 # =====================================================================

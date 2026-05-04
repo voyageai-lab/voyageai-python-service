@@ -1,12 +1,9 @@
 """
 Pydantic models for travel itinerary structured output.
 
-These models are used for TWO purposes:
-1. Schema definition for OpenAI strict mode (ai_service.py — standalone path)
-2. Post-generation validation for prompt-guided JSON (agent_service.py — agent path)
-
-For purpose #2, constraints are deliberately relaxed (no strict patterns)
-so Pydantic accepts minor LLM output variations (e.g., "act-day1-1" vs "act-day1-001").
+Used for post-generation validation of prompt-guided JSON from the agent.
+Constraints are deliberately relaxed (no strict patterns) so Pydantic
+accepts minor LLM output variations (e.g., "act-day1-1" vs "act-day1-001").
 The prompt guides the format; Pydantic validates the structure.
 
 Extra fields policy:

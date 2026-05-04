@@ -25,10 +25,10 @@ from voyageai.rag.tool_rag import tool_rag
 from voyageai.schemas.tool import ToolCallRequest, ToolCallResponse
 from voyageai.schemas.tool_metadata import ToolMetadata, ToolSelectionResult
 from voyageai.services.responses_agent_service import ResponsesAgentService
-
-_agent_service = ResponsesAgentService()
 from voyageai.tools.rate_limiter import rate_limiter
 from voyageai.tools.registry import tool_registry
+
+_agent_service = ResponsesAgentService()
 
 logger = logging.getLogger(__name__)
 

@@ -98,7 +98,7 @@ class CostTracker:
 
 
 class ResilientAgentPipeline:
-    """Wraps AgentService with retry, timeout, and fallback logic.
+    """Wraps ResponsesAgentService with retry, timeout, and fallback logic.
 
     The pipeline applies these resilience layers in order:
     1. Timeout: Cancel if total time exceeds limit

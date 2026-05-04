@@ -36,7 +36,6 @@ from voyageai.kafka.producer import KafkaProgressProducer
 from voyageai.kafka.schemas import ClarificationReplyEvent, PlanningRequestEvent
 from voyageai.logging_config import clear_trace_context, set_trace_context
 from voyageai.resilience import CostTracker, ResilientAgentPipeline
-from voyageai.config import settings
 from voyageai.services.agent_types import AgentResponse, LLMCallRecord, ProgressCallback
 from voyageai.services.responses_agent_service import ResponsesAgentService
 from voyageai.storage.mongodb import MongoDBResultStore
@@ -68,13 +67,7 @@ class PlanningWorker:
         self._producer = producer or KafkaProgressProducer()
         self._guard = idempotency_guard or IdempotencyGuard()
         self._store = result_store or MongoDBResultStore()
-        if agent_service:
-            self._agent = agent_service
-        elif settings.use_responses_api:
-            self._agent = ResponsesAgentService()
-        else:
-            from voyageai.services.agent_service import AgentService
-            self._agent = AgentService()
+        self._agent = agent_service or ResponsesAgentService()
         self._dlq = dlq_producer or DeadLetterProducer()
 
     def handle_request(self, event: PlanningRequestEvent) -> None:

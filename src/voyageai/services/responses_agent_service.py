@@ -1,8 +1,7 @@
 """
-Responses API Agent Service — feature-complete replacement for the Chat
-Completions agent.
+AI Agent Service using the OpenAI Responses API.
 
-Uses OpenAI's Responses API (``client.responses.create()``) which supports:
+Uses ``client.responses.create()`` which supports:
 - Built-in ``web_search`` tool (no API key, billed per-token)
 - Native MCP server connections (Google Maps, Xiaohongshu)
 - ``previous_response_id`` for server-managed conversation state
@@ -10,7 +9,7 @@ Uses OpenAI's Responses API (``client.responses.create()``) which supports:
 - Structured text output via ``text.format``
 - Streaming with granular events
 
-All features previously exclusive to ``AgentService`` have been ported:
+Features:
 - Tool-RAG (semantic tool selection)
 - Xiaohongshu pre-fetch (parallel search + auth recovery + context injection)
 - XHS source link post-processing
@@ -21,9 +20,8 @@ All features previously exclusive to ``AgentService`` have been ported:
 - Retry for incomplete days in final generation
 - call_single_tool for debug endpoints
 
-This service uses the shared ``agent_types`` module for types, constants,
-prompt templates, and cost tracking — the same module used by the legacy
-``AgentService``, ensuring identical behaviour.
+Shared types (AgentResponse, prompt templates, cost tracking) live in
+``agent_types.py``.
 """
 
 from __future__ import annotations
@@ -93,11 +91,7 @@ def _build_responses_tools(
 
 
 class ResponsesAgentService:
-    """Agent using the OpenAI Responses API.
-
-    Feature-complete replacement for ``AgentService`` — same interface,
-    same return type, all features ported.
-    """
+    """AI Agent using the OpenAI Responses API."""
 
     # JSON structure example for prompt-guided final generation.
     _ITINERARY_JSON_EXAMPLE = """{

@@ -198,7 +198,7 @@ class TestPlanningWorker:
 
     def _create_mock_agent_response(self, success: bool = True):
         """Create a mock AgentResponse."""
-        from voyageai.services.agent_service import AgentResponse
+        from voyageai.services.agent_types import AgentResponse
         from voyageai.schemas.itinerary import StructuredItinerary
 
         if success:

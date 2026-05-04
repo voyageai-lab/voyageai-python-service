@@ -1,8 +1,8 @@
-"""Shared types, constants, and helpers for agent services.
+"""Shared types, constants, and helpers for the agent service.
 
-Extracted from agent_service.py so that both the legacy Chat Completions
-agent and the new Responses API agent can share a single source of truth
-for AgentResponse, prompt templates, and cost tracking.
+Contains AgentResponse, prompt templates, cost tracking, and
+shared helper functions used by ResponsesAgentService and the
+worker/resilience pipeline.
 """
 
 import logging
