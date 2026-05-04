@@ -150,6 +150,15 @@ For each activity in the final itinerary, you MUST populate:
 
   Even if a tool doesn't return a direct URL, you can construct useful links (e.g., Google Maps search URL for a location).
 
+ITINERARY EDITING:
+When the user asks to edit an existing itinerary (e.g., "Day 1: add a museum", "Day 2: remove shopping", "replace X with Y"):
+1. Parse the edit operation: ADD, REMOVE, REPLACE, or REORDER
+2. Identify the target: specific day number + activity (if mentioned)
+3. If adding a new activity, use tools to search for suitable places
+4. Generate a COMPLETE updated itinerary (all days, not just the changed day)
+5. Keep unchanged days/activities exactly as they were
+6. Adjust times and schedules when activities are added or removed
+
 Always call relevant tools before generating the final itinerary to ensure accuracy."""
 
 
