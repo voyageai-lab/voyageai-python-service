@@ -17,21 +17,17 @@ Verifies:
 13. Retry for incomplete days
 """
 
-import sys
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-
-# Pre-mock chromadb to avoid Python 3.14 pydantic v1 incompatibility
-if "chromadb" not in sys.modules:
-    sys.modules["chromadb"] = MagicMock()
-    sys.modules["chromadb.config"] = MagicMock()
 
 from voyageai.services.responses_agent_service import (
     ResponsesAgentService,
     _build_responses_tools,
 )
 from voyageai.services.agent_types import AgentResponse, _is_permanent_error
+from voyageai.services.itinerary_generator import validate_itinerary, parse_itinerary
+from voyageai.services.xiaohongshu_prefetch import extract_destination, inject_xhs_source_links
 
 
 class TestBuildResponsesTools:
@@ -78,25 +74,22 @@ class TestResponsesAgentService:
             assert service.tool_rag_top_k == 5
 
     def test_parse_itinerary_valid_json(self):
-        service = ResponsesAgentService.__new__(ResponsesAgentService)
         text = '```json\n{"metadata": {"destination": "Tokyo", "start_date": "2026-03-15", "end_date": "2026-03-17", "total_days": 3, "budget": "Medium"}, "days": [{"day_number": 1, "date": "2026-03-15", "theme": "Test", "activities": [{"activity_id": "act-day1-001", "time": "09:00-11:00", "title": "Test", "description": "Desc", "location": {"name": "Place", "latitude": 35.0, "longitude": 139.0}}]}]}\n```'
-        result = service._parse_itinerary(text)
+        result = parse_itinerary(text)
         assert result is not None
         assert result.metadata.destination == "Tokyo"
 
     def test_parse_itinerary_empty(self):
-        service = ResponsesAgentService.__new__(ResponsesAgentService)
-        assert service._parse_itinerary("") is None
-        assert service._parse_itinerary("no json here") is None
+        assert parse_itinerary("") is None
+        assert parse_itinerary("no json here") is None
 
     def test_parse_itinerary_invalid_json(self):
-        service = ResponsesAgentService.__new__(ResponsesAgentService)
-        assert service._parse_itinerary("{invalid}") is None
+        assert parse_itinerary("{invalid}") is None
 
     def test_extract_destination(self):
-        assert ResponsesAgentService._extract_destination("Plan a 3 day trip to Barcelona") == "Barcelona"
-        assert "Tokyo" in ResponsesAgentService._extract_destination("Visit Tokyo in March")
-        assert ResponsesAgentService._extract_destination("Random text") == "Random text"
+        assert extract_destination("Plan a 3 day trip to Barcelona") == "Barcelona"
+        assert "Tokyo" in extract_destination("Visit Tokyo in March")
+        assert extract_destination("Random text") == "Random text"
 
 
 class TestPermanentErrorDetection:
@@ -204,16 +197,16 @@ class TestValidateItinerary:
                  "location": {"name": "P", "latitude": 35.0, "longitude": 139.0}}
             ]}],
         })
-        itinerary, err = ResponsesAgentService._validate_itinerary(content)
+        itinerary, err = validate_itinerary(content)
         assert itinerary is not None
         assert err is None
 
     def test_validate_empty(self):
-        itinerary, err = ResponsesAgentService._validate_itinerary("")
+        itinerary, err = validate_itinerary("")
         assert itinerary is None
 
     def test_validate_invalid_json(self):
-        itinerary, err = ResponsesAgentService._validate_itinerary("{not valid}")
+        itinerary, err = validate_itinerary("{not valid}")
         assert itinerary is None
         assert "Invalid JSON" in err
 
@@ -226,7 +219,7 @@ class TestValidateItinerary:
             ]}],
         })
         content = f"```json\n{inner}\n```"
-        itinerary, err = ResponsesAgentService._validate_itinerary(content)
+        itinerary, err = validate_itinerary(content)
         assert itinerary is not None
         assert itinerary.metadata.destination == "Paris"
 
@@ -329,7 +322,7 @@ class TestResponsesApiIntegration:
         orig_web = real_settings.enable_builtin_web_search
         orig_mcp = real_settings.google_maps_mcp_url
         real_settings.enable_builtin_web_search = False
-        real_settings.google_maps_mcp_url = "http://localhost:8080/mcp"
+        real_settings.google_maps_mcp_url = "https://maps.example.com/mcp"
         try:
             await service.generate_with_tools(requirements="Test")
         finally:
@@ -414,7 +407,7 @@ class TestXhsSourceLinkInjection:
             "URL: https://www.xiaohongshu.com/explore/abc123\n"
             "Content: Great ramen spots...\n"
         )
-        ResponsesAgentService._inject_xhs_source_links(itinerary, xhs_context)
+        inject_xhs_source_links(itinerary, xhs_context)
         links = itinerary.days[0].activities[0].source_links
         assert any(sl.source == "xiaohongshu" for sl in links)
         assert any("abc123" in sl.url for sl in links)
@@ -440,6 +433,6 @@ class TestXhsSourceLinkInjection:
             "Author: User | Likes: 100\n"
             "URL: https://www.xiaohongshu.com/explore/abc123\n"
         )
-        ResponsesAgentService._inject_xhs_source_links(itinerary, xhs_context)
+        inject_xhs_source_links(itinerary, xhs_context)
         urls = [sl.url for sl in itinerary.days[0].activities[0].source_links]
         assert urls.count("https://www.xiaohongshu.com/explore/abc123") == 1

@@ -41,6 +41,9 @@ class PlanningRequestEvent(BaseModel):
     requirements: str
     task_type: str = Field(alias="taskType")
     conversation_context: str | None = Field(default=None, alias="conversationContext")
+    edit_mode: bool = Field(default=False, alias="editMode")
+    user_openai_api_key: str | None = Field(default=None, alias="userOpenaiApiKey")
+    user_gemini_api_key: str | None = Field(default=None, alias="userGeminiApiKey")
     timestamp: datetime
 
 
@@ -67,6 +70,8 @@ class ClarificationReplyEvent(BaseModel):
     answers: list[dict[str, Any]] = Field(default_factory=list)
     original_requirements: str = Field(default="", alias="originalRequirements")
     conversation_context: str | None = Field(default=None, alias="conversationContext")
+    user_openai_api_key: str | None = Field(default=None, alias="userOpenaiApiKey")
+    user_gemini_api_key: str | None = Field(default=None, alias="userGeminiApiKey")
     timestamp: datetime
 
 

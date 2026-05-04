@@ -70,6 +70,7 @@ class KafkaRequestConsumer:
             "enable.auto.commit": settings.kafka_auto_commit,
             "auto.commit.interval.ms": settings.kafka_auto_commit_interval_ms,
             "session.timeout.ms": settings.kafka_session_timeout_ms,
+            "max.poll.interval.ms": settings.kafka_max_poll_interval_ms,
         }
         consumer = Consumer(config)
         topics = [self._topic]

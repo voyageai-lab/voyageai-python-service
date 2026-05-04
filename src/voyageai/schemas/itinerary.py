@@ -141,3 +141,4 @@ class StructuredItinerary(BaseModel):
         default_factory=list,
         description="Structured travel tips with categories, priorities, and booking reminders",
     )
+    version: int = Field(default=1, description="Itinerary version — incremented on each edit")

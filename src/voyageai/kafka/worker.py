@@ -69,6 +69,7 @@ class PlanningWorker:
         self._store = result_store or MongoDBResultStore()
         self._agent = agent_service or ResponsesAgentService()
         self._dlq = dlq_producer or DeadLetterProducer()
+        self._user_key_cache: dict[str, str] = {}
 
     def handle_request(self, event: PlanningRequestEvent) -> None:
         """Handle a planning request event from Kafka.
@@ -143,33 +144,113 @@ class PlanningWorker:
         agent pipeline and MongoDB save in the same event loop.
         """
         task_id = event.task_id
+        is_edit = event.edit_mode
+        logger.info("Task %s: is_edit=%s, project=%s", task_id, is_edit, event.project_id)
 
-        # Phase 2: Pre-flight analysis — check if clarification is needed
-        progress_callback = self._make_progress_callback(task_id)
+        # Always try to fetch the latest completed itinerary from MongoDB
+        existing_itinerary: str | None = None
         try:
-            analysis = await self._agent.analyze_request(
-                requirements=event.requirements,
-                conversation_context=event.conversation_context,
-                progress_callback=progress_callback,
+            results = await self._store.get_results_by_project(
+                event.project_id, limit=10
             )
-            if not analysis.get("ready", True):
-                # Clarification needed — send event and stop processing
-                # The task stays in PROCESSING state; it will be resumed
-                # when the user replies via ClarificationReplyEvent.
-                self._producer.send_agent_event(
-                    task_id=task_id,
-                    stage="CLARIFICATION",
-                    percent=15,
-                    message="I have some questions before planning your trip...",
-                    event_type="clarification_needed",
-                    event_data={"questions": analysis.get("questions", [])},
-                )
-                logger.info("Clarification needed for task %s, waiting for user reply", task_id)
-                return
+            for r in results:
+                if r.get("status") == "COMPLETED" and r.get("itinerary_json"):
+                    existing_itinerary = r["itinerary_json"]
+                    logger.info(
+                        "Fetched existing itinerary (%d chars) for project %s",
+                        len(existing_itinerary), event.project_id,
+                    )
+                    break
         except Exception as e:
-            logger.warning("Pre-flight analysis failed, proceeding with planning: %s", e)
+            logger.warning("Failed to fetch existing itinerary: %s", e)
 
-        response = await self._run_pipeline(event)
+        if is_edit and not existing_itinerary:
+            logger.warning(
+                "Edit mode but no completed itinerary for project %s, "
+                "falling back to full pipeline", event.project_id,
+            )
+
+        # Build the agent with the correct API key early so that
+        # both clarification analysis and the pipeline use it.
+        # Priority: user Gemini key > user OpenAI key > platform OpenAI key > Ollama
+        agent = self._agent
+        gemini_key = getattr(event, "user_gemini_api_key", None)
+        if gemini_key and gemini_key.strip():
+            key = gemini_key.strip()
+            logger.info(
+                "Using user-provided Gemini API key for task %s (prefix=%s)",
+                task_id, key[:8] + "..." if len(key) > 8 else "***",
+            )
+            agent = self._agent.with_gemini(key)
+            self._user_key_cache[event.user_id] = f"gemini:{key}"
+        elif event.user_openai_api_key:
+            key = event.user_openai_api_key.strip()
+            logger.info(
+                "Using user-provided OpenAI API key for task %s (len=%d, prefix=%s)",
+                task_id, len(key), key[:8] + "..." if len(key) > 8 else "***",
+            )
+            agent = self._agent.with_api_key(key)
+            self._user_key_cache[event.user_id] = key
+        elif not settings.openai_api_key:
+            if settings.ollama_enabled and settings.ollama_base_url:
+                logger.info(
+                    "No OpenAI key for task %s — using Ollama (%s) with full pipeline",
+                    task_id, settings.ollama_model,
+                )
+                self._producer.send_progress(
+                    task_id=task_id, stage="PROCESSING", percent=15,
+                    message="No OpenAI API key — using local model with tools...",
+                )
+                agent = self._agent.with_ollama()
+            else:
+                logger.warning(
+                    "No API key for task %s — no OpenAI, Gemini, or Ollama available",
+                    task_id,
+                )
+                self._producer.send_result(
+                    task_id=task_id,
+                    user_id=event.user_id,
+                    project_id=event.project_id,
+                    status="FAILED",
+                    error="NO_API_KEY: Please set your OpenAI or Gemini API key in Settings before planning a trip.",
+                )
+                self._producer.send_progress(
+                    task_id=task_id, stage="FAILED", percent=0,
+                    message="No API key configured.",
+                )
+                return
+
+        # Clarification only for first-time planning (no existing itinerary)
+        if not is_edit and not existing_itinerary:
+            progress_callback = self._make_progress_callback(task_id)
+            try:
+                analysis = await agent.analyze_request(
+                    requirements=event.requirements,
+                    conversation_context=event.conversation_context,
+                    progress_callback=progress_callback,
+                )
+                if not analysis.get("ready", True):
+                    self._producer.send_agent_event(
+                        task_id=task_id,
+                        stage="CLARIFICATION",
+                        percent=15,
+                        message="I have some questions before planning your trip...",
+                        event_type="clarification_needed",
+                        event_data={"questions": analysis.get("questions", [])},
+                    )
+                    logger.info("Clarification needed for task %s, waiting for user reply", task_id)
+                    return
+            except Exception as e:
+                logger.warning("Pre-flight analysis failed, proceeding with planning: %s", e)
+        elif is_edit:
+            logger.info("Edit mode for task %s — skipping clarification", task_id)
+        else:
+            logger.info("Follow-up with existing itinerary — skipping clarification")
+
+        response = await self._run_pipeline(
+            event, existing_itinerary, is_surgical_edit=is_edit,
+            agent_override=agent,
+        )
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
@@ -383,6 +464,16 @@ class PlanningWorker:
 
             # Create a synthetic PlanningRequestEvent with enriched requirements.
             # Preserve conversation_context so the agent keeps project continuity.
+            # Resolve API keys: from event, from cache, or None
+            api_key = getattr(event, "user_openai_api_key", None)
+            gemini_key = getattr(event, "user_gemini_api_key", None)
+            if not api_key and not gemini_key and event.user_id in self._user_key_cache:
+                cached = self._user_key_cache[event.user_id]
+                if cached.startswith("gemini:"):
+                    gemini_key = cached[7:]
+                else:
+                    api_key = cached
+
             enriched_event = PlanningRequestEvent(
                 task_id=task_id,
                 user_id=event.user_id,
@@ -390,6 +481,8 @@ class PlanningWorker:
                 requirements=enriched_requirements,
                 task_type="CONVERSATION_UPDATE" if event.conversation_context else "INITIAL_PLANNING",
                 conversation_context=event.conversation_context,
+                user_openai_api_key=api_key,
+                user_gemini_api_key=gemini_key,
                 timestamp=event.timestamp,
             )
 
@@ -428,7 +521,24 @@ class PlanningWorker:
         Unlike _run_and_save, this skips the pre-flight analysis.
         """
         task_id = event.task_id
-        response = await self._run_pipeline(event)
+
+        # Resolve agent: Gemini > OpenAI > Ollama
+        agent_override = None
+        gemini_key = getattr(event, "user_gemini_api_key", None)
+        if gemini_key and gemini_key.strip():
+            agent_override = self._agent.with_gemini(gemini_key.strip())
+            logger.info("Clarification reply %s — using Gemini", task_id)
+        elif not event.user_openai_api_key and not settings.openai_api_key:
+            if settings.ollama_enabled and settings.ollama_base_url:
+                agent_override = self._agent.with_ollama()
+                logger.info(
+                    "Clarification reply %s — using Ollama (%s)",
+                    task_id, settings.ollama_model,
+                )
+
+        response = await self._run_pipeline(
+            event, agent_override=agent_override,
+        )
         processing_time_ms = int((time.time() - start_time) * 1000)
 
         if response.success and response.itinerary:
@@ -532,30 +642,16 @@ class PlanningWorker:
         return _callback
 
     async def _run_pipeline(
-        self, event: PlanningRequestEvent
+        self,
+        event: PlanningRequestEvent,
+        existing_itinerary: str | None = None,
+        is_surgical_edit: bool = False,
+        agent_override: Any | None = None,
     ) -> AgentResponse:
-        """Run the async AI agent pipeline with progress updates.
-
-        Module 13: Uses ResilientAgentPipeline for:
-        - Retry with exponential backoff on transient failures
-        - Timeout to prevent hung tasks
-        - Fallback response when all retries exhausted
-        - Cost tracking per task
-
-        Phase 1 enhancement: Rich progress callback for real-time SSE streaming.
-
-        Args:
-            event: Planning request event with user requirements.
-
-        Returns:
-            AgentResponse with itinerary and tool trace.
-        """
+        """Run the async AI agent pipeline with progress updates."""
         task_id = event.task_id
-
-        # Create rich progress callback for real-time agent events
         progress_callback = self._make_progress_callback(task_id)
 
-        # Progress: Starting the pipeline
         self._producer.send_agent_event(
             task_id=task_id,
             stage="PROCESSING",
@@ -565,11 +661,34 @@ class PlanningWorker:
             event_data={"stage": "PROCESSING", "message": "Analyzing your travel request..."},
         )
 
-        # Run agent through resilient pipeline (retry/timeout/fallback)
+        # Resolve the agent with the correct API key.
+        # Priority: explicit override > Gemini key > OpenAI key > cached key > default
+        agent: ResponsesAgentService
+        if agent_override is not None:
+            agent = agent_override
+        elif getattr(event, "user_gemini_api_key", None):
+            agent = self._agent.with_gemini(event.user_gemini_api_key.strip())
+        elif event.user_openai_api_key:
+            agent = self._agent.with_api_key(event.user_openai_api_key.strip())
+        elif event.user_id in self._user_key_cache:
+            cached = self._user_key_cache[event.user_id]
+            if cached.startswith("gemini:"):
+                logger.info("Using cached Gemini key for user %s", event.user_id)
+                agent = self._agent.with_gemini(cached[7:])
+            else:
+                logger.info("Using cached OpenAI key for user %s", event.user_id)
+                agent = self._agent.with_api_key(cached)
+        else:
+            agent = self._agent
+
+        pipeline_timeout = settings.worker_pipeline_timeout_seconds
+        if getattr(agent, "_is_local_model", False):
+            pipeline_timeout = settings.worker_pipeline_timeout_ollama_seconds
+
         pipeline = ResilientAgentPipeline(
-            agent=self._agent,
+            agent=agent,
             max_retries=3,
-            timeout_seconds=settings.worker_pipeline_timeout_seconds,
+            timeout_seconds=pipeline_timeout,
             budget_limit_usd=1.0,
         )
 
@@ -578,6 +697,8 @@ class PlanningWorker:
             user_id=event.user_id,
             conversation_context=event.conversation_context,
             progress_callback=progress_callback,
+            existing_itinerary=existing_itinerary if is_surgical_edit else None,
+            existing_itinerary_context=existing_itinerary if not is_surgical_edit else None,
         )
 
         # Log cost tracking summary

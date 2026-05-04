@@ -32,16 +32,16 @@ class TestLocation:
         loc = Location(name="Test", latitude=91.0, longitude=0)
         assert loc.latitude == 91.0
 
-    def test_extra_fields_ignored(self):
-        """Test that extra fields from LLM output are silently ignored."""
+    def test_extra_fields_allowed(self):
+        """Extra fields from LLM output are preserved (extra='allow')."""
         loc = Location(
             name="Test",
             latitude=35.0,
             longitude=139.0,
-            extra_field="should be ignored",  # type: ignore[call-arg]
+            extra_field="kept",  # type: ignore[call-arg]
         )
         assert loc.name == "Test"
-        assert not hasattr(loc, "extra_field")
+        assert loc.extra_field == "kept"  # type: ignore[attr-defined]
 
 
 class TestActivity:
