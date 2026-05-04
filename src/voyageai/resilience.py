@@ -28,6 +28,7 @@ from tenacity import (
 
 from voyageai.config import settings
 from voyageai.services.agent_service import AgentResponse, AgentService, ProgressCallback
+from voyageai.services.responses_agent_service import ResponsesAgentService
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class ResilientAgentPipeline:
 
     def __init__(
         self,
-        agent: AgentService | None = None,
+        agent: AgentService | ResponsesAgentService | None = None,
         max_retries: int = 3,
         timeout_seconds: int | None = None,
         budget_limit_usd: float = 1.0,

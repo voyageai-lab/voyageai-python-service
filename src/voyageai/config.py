@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     google_maps_min_rating: float = 3.5
     foursquare_min_rating: float = 0.0  # Foursquare uses 0-10 scale; 0 = no filter
 
+    # OpenAI Responses API (set to True to use the new Responses API instead of Chat Completions)
+    use_responses_api: bool = False
+    # Built-in web search via Responses API (no API key needed, included in token cost)
+    enable_builtin_web_search: bool = True
+    # MCP servers to connect natively via Responses API
+    google_maps_mcp_url: str = "http://localhost:8080/mcp"
+
 
 settings = Settings()
 
