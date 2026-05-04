@@ -29,6 +29,7 @@ Example:
     )
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -73,45 +74,99 @@ CORE_TOOLS: set[str] = {
 # and eliminating RAG avoids the risk of missing critical tools.
 TOOL_RAG_SKIP_THRESHOLD: int = 20
 
-AGENT_SYSTEM_PROMPT = """You are an expert travel planner assistant with access to real-time tools.
+_AGENT_SYSTEM_PROMPT_TEMPLATE = """You are an expert travel planner assistant with access to real-time tools.
+
+Today's date is {today}. Use this as the reference date when the user says "next week", "this month", etc.
+When calling weather, holiday, or flight tools, always use dates in or near {current_year} unless the user specifies otherwise.
 
 Your goal is to create detailed, practical travel itineraries. You have access to the following tools:
-- geocode_location: Convert city/place names to coordinates (USE THIS FIRST)
-- get_weather_forecast: Get weather forecast (needs coordinates from geocode)
-- convert_currency: Convert between currencies for budget planning
-- convert_timezone: Convert times between timezones for flight planning
-- calculate_distance: Calculate distance between locations
-- get_public_holidays: Check for public holidays that might affect plans
-- web_search: Search the web for up-to-date travel info, tips, and advisories
-- search_attractions: Find tourist attractions and points of interest near a location (free, OSM data)
-- search_restaurants: Find restaurants and cafes near a location (free, OSM data)
-- search_places_foursquare: Search for places (restaurants, hotels, attractions) using Foursquare's 100M+ POI database with ratings
-- search_flights: Search for flight offers between airports with prices and airlines (use IATA airport codes like SEA, NRT, JFK)
-- googlemaps__search_places: Search for places using Google Maps (via MCP) with ratings, price levels, and opening hours (very accurate global data)
-- googlemaps__get_directions: Get driving/walking/transit directions between two locations with distance, duration, and step-by-step route (via MCP)
+{tool_list}
 
 IMPORTANT WORKFLOW:
-1. First, use geocode_location to get coordinates for the destination
-2. Then use other tools (weather, distance, attractions, restaurants) that need coordinates
-3. Use search_places_foursquare for high-quality restaurant and hotel recommendations with ratings
-4. Use search_flights when the user mentions flying or needs flight info between cities
-5. Use googlemaps__search_places for accurate place search with ratings, price levels, and Google Maps URLs
-6. Use googlemaps__get_directions when the user needs transit/driving/walking directions between locations
-7. Use web_search for destination guides, travel tips, and up-to-date info
-6. Check holidays for the destination country
-7. Consider currency conversion for budget
-8. Finally, generate a comprehensive itinerary
+1. First, geocode the destination to get coordinates
+2. Then use tools that need coordinates (weather, distance, attractions, restaurants)
+3. Use place-search tools for high-quality restaurant and hotel recommendations with ratings
+4. Use googlemaps__get_place_details to get official website URLs, phone numbers, and reviews for key places
+5. Use flight search when the user mentions flying or needs flight info between cities
+6. Use web search for destination guides, travel tips, and up-to-date info
+7. Check holidays for the destination country
+8. If Xiaohongshu (小红书) travel content is provided in the user message, USE it to enrich the itinerary:
+   - Extract specific restaurant names, ticket prices, local tips, and hidden gems from the content.
+   - Include the Xiaohongshu post URLs in source_links for relevant activities.
+   - Do NOT call xiaohongshu tools yourself — the content is already pre-fetched for you.
+9. Consider currency conversion for budget
+10. Finally, generate a comprehensive itinerary
+
+QUALITY FILTERING:
+- Prioritize highly-rated places (4.0+ stars on Google Maps, 7.0+ on Foursquare).
+- Do NOT recommend places with Google Maps ratings below 3.5 unless they are the only option for a specific category.
+- When presenting places, mention the rating so users can make informed decisions.
+- Sort recommendations by rating when possible — best-rated first.
+
+TOOL FALLBACK & ERROR HANDLING:
+- If a tool returns an authentication error (invalid key, expired, 401, 403, blocked), do NOT retry it. Switch to an alternative tool immediately.
+- If a place-search tool returns zero results, try a different one or use web search as a fallback.
+- For island, rural, or remote destinations (e.g., Hawaii, Maldives, rural countryside), use LARGER search radii for place/restaurant/attraction tools (10000-50000 meters).
+  The geocoded center of an island/region may be far from any populated area.
+- NEVER retry the exact same tool call with the same parameters if it just failed.
 
 When generating the final itinerary:
 - Include specific times for each activity
 - Consider weather conditions when planning outdoor activities
 - Account for holidays (some attractions may be closed)
 - Provide practical budget estimates in local currency
-- Use real attraction and restaurant data from tool results
-- Include flight prices when available from search_flights
+- Use real data from tool results (attractions, restaurants, flights, etc.)
 - Include sunrise/sunset times for photography opportunities
 
+SOURCE LINKS & WEBSITE URLS (IMPORTANT):
+For each activity in the final itinerary, you MUST populate:
+- "website_url": The official website URL for the attraction/restaurant if found in tool results (e.g., from Foursquare, OpenStreetMap, or web search). Set to null if not available.
+- "source_links": An array of reference links where users can learn more. Each link has:
+  {{"title": "display text", "url": "https://...", "source": "official|xiaohongshu|foursquare|google_maps|web_search", "snippet": "optional brief description"}}
+
+  Populate source_links from:
+  - Tool results that return website URLs (source: "official" or "foursquare")
+  - Xiaohongshu posts (source: "xiaohongshu") — For each Xiaohongshu note you retrieved via get_feed_detail,
+    construct the URL as https://www.xiaohongshu.com/explore/{{note_id}} where note_id is the "id"/"noteId" field.
+    Use the note's "title" or "displayTitle" as the link title. Include a snippet summarizing the
+    post's key recommendations (e.g., "798 likes · 门票26欧, 彩色玻璃窗美得像天堂"). You MUST include
+    at least 1-2 Xiaohongshu links in source_links when xiaohongshu results are available.
+    Distribute them across activities that the Xiaohongshu post discusses.
+  - Web search results (source: "web_search")
+  - Google Maps links (source: "google_maps")
+
+  Even if a tool doesn't return a direct URL, you can construct useful links (e.g., Google Maps search URL for a location).
+
 Always call relevant tools before generating the final itinerary to ensure accuracy."""
+
+
+def _build_system_prompt(tool_descriptions: list[dict[str, str]]) -> str:
+    """Build the agent system prompt with a dynamically generated tool list.
+
+    The current date is injected so the LLM uses correct years for
+    weather forecasts, holidays, flight searches, etc.
+
+    Args:
+        tool_descriptions: List of {"name": ..., "description": ...} dicts,
+            typically from ``tool_registry.get_tool_descriptions()`` or
+            from a Tool-RAG selection.
+    """
+    from datetime import date
+
+    tool_names = [t["name"] for t in tool_descriptions]
+    tool_lines = "\n".join(
+        f"- {t['name']}: {t['description']}" for t in tool_descriptions
+    )
+    today = date.today()
+    logger.info(
+        "System prompt built with %d tools: %s",
+        len(tool_names), ", ".join(tool_names),
+    )
+    return _AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+        tool_list=tool_lines,
+        today=today.isoformat(),
+        current_year=today.year,
+    )
 
 
 @dataclass
@@ -240,6 +295,44 @@ class AgentService:
             await callback(event_type, data)
         except Exception:
             logger.warning("Progress callback error for event %s", event_type, exc_info=True)
+
+    async def _with_heartbeat(
+        self,
+        coro: Any,
+        callback: ProgressCallback | None,
+        interval: float = 10,
+        message: str = "Still working...",
+    ) -> Any:
+        """Run a coroutine with periodic heartbeat 'thinking' events.
+
+        During long LLM calls (e.g., o4-mini final generation taking 30-60s),
+        the user sees no progress. This sends periodic events so the frontend
+        can show a "still working" indicator.
+        """
+        if callback is None:
+            return await coro
+
+        async def heartbeat() -> None:
+            count = 0
+            while True:
+                await asyncio.sleep(interval)
+                count += 1
+                elapsed = int(count * interval)
+                await self._emit(callback, "thinking", {
+                    "message": f"{message} ({elapsed}s elapsed)",
+                    "elapsed_heartbeats": count,
+                    "elapsed_seconds": elapsed,
+                })
+
+        task = asyncio.create_task(heartbeat())
+        try:
+            return await coro
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # ── Phase 2: Pre-flight analysis (clarification questions) ──
 
@@ -445,6 +538,384 @@ Rules:
         
         return tool_results, tool_traces
     
+    # ── Xiaohongshu pre-fetch (programmatic, not LLM-driven) ────────
+
+    @staticmethod
+    def _extract_destination(requirements: str) -> str:
+        """Extract the destination name from the requirements string.
+
+        Handles formats like:
+        - "Plan a 3 day trip to Barcelona"
+        - "Plan a 3 day trip to Barcelona\\n\\nAdditional details..."
+        - "Tokyo in March for 5 days"
+        """
+        import re
+        # Take the first line only (before additional details)
+        first_line = requirements.split("\n")[0].strip()
+        # Try "trip to X" pattern
+        m = re.search(r"trip to\s+(.+?)(?:\s+from\s|\s+in\s+\w+\s+\d|\s*$)", first_line, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().rstrip(".,;:!?")
+        # Try "visit X" or "travel to X" pattern
+        m = re.search(r"(?:visit|travel(?:ing)?\s+to|going\s+to|heading\s+to)\s+(.+?)(?:\s+from\s|\s+in\s+\w+\s+\d|\s*$)", first_line, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().rstrip(".,;:!?")
+        # Fallback: use first line (capped at 50 chars)
+        return first_line[:50]
+
+    async def _recover_xhs_auth(
+        self,
+        progress_callback: ProgressCallback | None = None,
+    ) -> bool:
+        """Detect Xiaohongshu login expiry, push QR code via SSE, poll for login.
+
+        Called when a Xiaohongshu search/detail call fails and we suspect
+        the headless browser session has expired.
+
+        Flow:
+        1. check_login_status → if already logged in, return True
+        2. get_login_qrcode → extract base64 image + expiry
+        3. Emit ``auth_required`` event via SSE (frontend shows QR code)
+        4. Poll check_login_status every 5 s for up to 120 s
+        5. On success → emit ``auth_success``; on timeout → emit ``auth_expired``
+
+        Returns:
+            True if login was recovered (or was already valid), False otherwise.
+        """
+        import base64
+
+        status_tool = tool_registry.get("xiaohongshu__check_login_status")
+        qr_tool = tool_registry.get("xiaohongshu__get_login_qrcode")
+        if not status_tool or not qr_tool:
+            logger.warning("XHS auth tools not available, cannot recover login")
+            return False
+
+        # 1. Verify login is actually expired
+        try:
+            status_result = await asyncio.wait_for(
+                status_tool.execute(), timeout=15,
+            )
+            status_text = ""
+            if status_result.success and status_result.output:
+                status_text = str(status_result.output)
+            elif status_result.success and not status_result.output:
+                status_text = status_result.error or ""
+            if "已登录" in status_text:
+                logger.info("XHS auth check: already logged in")
+                return True
+            logger.info("XHS auth check: not logged in — starting QR recovery")
+        except Exception as e:
+            logger.warning("XHS check_login_status failed: %s", e)
+            return False
+
+        # 2. Get QR code
+        try:
+            qr_result = await asyncio.wait_for(
+                qr_tool.execute(), timeout=15,
+            )
+        except Exception as e:
+            logger.warning("XHS get_login_qrcode failed: %s", e)
+            return False
+
+        # Extract base64 image and expiry text from MCP response.
+        # The MCP tool returns ToolResult whose .output may contain the
+        # raw text + image content.  The MCPToolAdapter joins text parts;
+        # image data may be embedded as base64 in the output or available
+        # as a separate content part.  We handle both cases.
+        qr_base64: str | None = None
+        expiry_text: str = ""
+
+        if qr_result.success and qr_result.output:
+            raw = qr_result.output
+            if isinstance(raw, dict):
+                qr_base64 = raw.get("qrcode_base64") or raw.get("image") or raw.get("data")
+                expiry_text = raw.get("message", "") or raw.get("text", "")
+            elif isinstance(raw, str):
+                expiry_text = raw
+                # Try to extract a base64-encoded PNG embedded in text
+                import re
+                b64_match = re.search(r"[A-Za-z0-9+/=]{100,}", raw)
+                if b64_match:
+                    qr_base64 = b64_match.group(0)
+
+        if not qr_base64:
+            logger.warning("XHS QR code: could not extract base64 image")
+            return False
+
+        # Parse expiry timestamp from text like "请在 2026-02-17 08:30:38 前扫码登录"
+        import re
+        expiry_iso = ""
+        ts_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", expiry_text)
+        if ts_match:
+            expiry_iso = ts_match.group(1).replace(" ", "T") + "Z"
+
+        # 3. Push auth_required event to frontend via SSE
+        logger.info("XHS auth: pushing QR code to frontend (expires %s)", expiry_iso or "unknown")
+        await self._emit(progress_callback, "auth_required", {
+            "service": "xiaohongshu",
+            "serviceName": "小红书",
+            "qrCodeBase64": qr_base64,
+            "expiresAt": expiry_iso,
+            "message": "请用小红书 App 扫码登录",
+        })
+
+        # 4. Poll login status every 5 s, up to 120 s
+        poll_interval = 5
+        max_polls = 24  # 24 * 5s = 120s
+        for attempt in range(max_polls):
+            await asyncio.sleep(poll_interval)
+            try:
+                check = await asyncio.wait_for(
+                    status_tool.execute(), timeout=10,
+                )
+                check_text = str(check.output) if check.success and check.output else (check.error or "")
+                if "已登录" in check_text:
+                    logger.info("XHS auth: login recovered after %ds", (attempt + 1) * poll_interval)
+                    await self._emit(progress_callback, "auth_success", {
+                        "service": "xiaohongshu",
+                        "serviceName": "小红书",
+                    })
+                    return True
+            except Exception as e:
+                logger.debug("XHS auth poll %d failed: %s", attempt + 1, e)
+
+        # 5. Timed out — user did not scan in time
+        logger.warning("XHS auth: login recovery timed out after %ds", max_polls * poll_interval)
+        await self._emit(progress_callback, "auth_expired", {
+            "service": "xiaohongshu",
+            "serviceName": "小红书",
+            "message": "登录超时，小红书推荐内容将不可用",
+        })
+        return False
+
+    async def _prefetch_xiaohongshu(
+        self,
+        destination: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> str | None:
+        """Pre-fetch Xiaohongshu travel content for the destination.
+
+        Runs search_feeds → get_feed_detail (top 1-2 posts) programmatically
+        so the LLM doesn't have to call these tools itself (avoiding parameter
+        format issues and wasted iterations).
+
+        If the initial search fails (e.g. login expired), attempts automatic
+        auth recovery via QR code pushed to the frontend.
+
+        Returns a formatted text block to inject into the LLM context, or None
+        if the search fails / returns nothing.
+        """
+        try:
+            search_tool = tool_registry.get("xiaohongshu__search_feeds")
+            detail_tool = tool_registry.get("xiaohongshu__get_feed_detail")
+            if not search_tool:
+                return None
+
+            logger.info("Xiaohongshu pre-fetch: searching for '%s'", destination)
+            await self._emit(progress_callback, "thinking", {
+                "text": f"Searching Xiaohongshu for '{destination}' travel tips...",
+            })
+
+            # Step 1: Search (headless browser can be slow — allow 60s)
+            keyword = f"{destination}旅游攻略"
+            logger.info("Xiaohongshu search keyword: '%s'", keyword)
+            search_result = await asyncio.wait_for(
+                search_tool.execute(keyword=keyword),
+                timeout=60,
+            )
+
+            # If search failed, attempt auth recovery and retry once
+            if not search_result.success or not search_result.output:
+                logger.warning("Xiaohongshu search failed: %s — attempting auth recovery", search_result.error)
+                recovered = await self._recover_xhs_auth(progress_callback)
+                if recovered:
+                    logger.info("XHS auth recovered, retrying search")
+                    await self._emit(progress_callback, "thinking", {
+                        "text": f"Login recovered! Retrying Xiaohongshu search for '{destination}'...",
+                    })
+                    search_result = await asyncio.wait_for(
+                        search_tool.execute(keyword=keyword),
+                        timeout=60,
+                    )
+                    if not search_result.success or not search_result.output:
+                        logger.warning("Xiaohongshu search still failed after auth recovery: %s", search_result.error)
+                        return None
+                else:
+                    return None
+
+            return await self._build_xhs_context(
+                search_result, destination, progress_callback,
+            )
+
+        except asyncio.TimeoutError:
+            logger.warning("Xiaohongshu pre-fetch timed out — attempting auth recovery")
+            recovered = await self._recover_xhs_auth(progress_callback)
+            if recovered:
+                try:
+                    logger.info("XHS auth recovered after timeout, retrying search")
+                    await self._emit(progress_callback, "thinking", {
+                        "text": f"Login recovered! Retrying Xiaohongshu search for '{destination}'...",
+                    })
+                    search_tool = tool_registry.get("xiaohongshu__search_feeds")
+                    if search_tool:
+                        keyword = f"{destination}旅游攻略"
+                        retry_result = await asyncio.wait_for(
+                            search_tool.execute(keyword=keyword),
+                            timeout=60,
+                        )
+                        if retry_result.success and retry_result.output:
+                            # Re-enter the normal flow with the result
+                            return await self._build_xhs_context(
+                                retry_result, destination, progress_callback,
+                            )
+                except Exception as retry_err:
+                    logger.warning("Xiaohongshu retry after auth recovery failed: %s", retry_err)
+            return None
+        except Exception as e:
+            logger.warning("Xiaohongshu pre-fetch failed: %s", e)
+            return None
+
+    async def _build_xhs_context(
+        self,
+        search_result: Any,
+        destination: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> str | None:
+        """Build formatted context text from a successful XHS search result.
+
+        Parses the feed list from *search_result*, fetches details for the
+        top 1-2 posts, and returns a text block ready to inject into the
+        LLM conversation.  Returns None if no usable content was found.
+        """
+        from voyageai.tools.base import ToolResult  # noqa: F811 — local import to avoid circular
+
+        detail_tool = tool_registry.get("xiaohongshu__get_feed_detail")
+
+        feeds = search_result.output if isinstance(search_result.output, dict) else {}
+        feed_list = feeds.get("feeds", [])
+        if not feed_list:
+            return None
+
+        sections: list[str] = []
+        posts_to_fetch = feed_list[:2]
+        for feed in posts_to_fetch:
+            feed_id = feed.get("id", "")
+            xsec_token = feed.get("xsecToken", "")
+            title = feed.get("noteCard", {}).get("displayTitle", "Unknown")
+            interact = feed.get("noteCard", {}).get("interactInfo", {})
+            likes = interact.get("likedCount", "?")
+            collects = interact.get("collectedCount", "?")
+            author = feed.get("noteCard", {}).get("user", {}).get("nickname", "Unknown")
+            note_url = (
+                f"https://www.xiaohongshu.com/explore/{feed_id}"
+                f"?xsec_token={xsec_token}&xsec_source=pc_search"
+                if xsec_token else
+                f"https://www.xiaohongshu.com/explore/{feed_id}"
+            )
+
+            desc_text = ""
+            if detail_tool and feed_id and xsec_token:
+                try:
+                    detail_result = await asyncio.wait_for(
+                        detail_tool.execute(feed_id=feed_id, xsec_token=xsec_token),
+                        timeout=30,
+                    )
+                    if detail_result.success and detail_result.output:
+                        data = detail_result.output if isinstance(detail_result.output, dict) else {}
+                        note = data.get("data", {}).get("note", data)
+                        desc_text = note.get("desc", "")
+                except Exception as e:
+                    logger.warning("Xiaohongshu get_feed_detail failed for %s: %s", feed_id, e)
+
+            section = (
+                f"### {title}\n"
+                f"Author: {author} | Likes: {likes} | Collects: {collects}\n"
+                f"URL: {note_url}\n"
+            )
+            if desc_text:
+                truncated = desc_text[:1500] + ("..." if len(desc_text) > 1500 else "")
+                section += f"Content:\n{truncated}\n"
+            sections.append(section)
+
+        if not sections:
+            return None
+
+        result_text = (
+            "=== XIAOHONGSHU (小红书) TRAVEL RECOMMENDATIONS ===\n"
+            "The following are popular travel posts from Xiaohongshu. "
+            "Use this information to enrich your itinerary with local tips, "
+            "restaurant recommendations, and insider knowledge. "
+            "Include the Xiaohongshu URLs in source_links (source: 'xiaohongshu').\n\n"
+            + "\n---\n".join(sections)
+        )
+
+        logger.info(
+            "Xiaohongshu pre-fetch: %d posts fetched, %d chars of content",
+            len(sections), len(result_text),
+        )
+        await self._emit(progress_callback, "thinking", {
+            "text": f"Found {len(sections)} Xiaohongshu travel posts with tips and recommendations.",
+        })
+        return result_text
+
+    @staticmethod
+    def _inject_xhs_source_links(
+        itinerary: StructuredItinerary,
+        xhs_context: str,
+    ) -> None:
+        """Post-process: add Xiaohongshu links to itinerary source_links.
+
+        The LLM often ignores instructions to include Xiaohongshu links.
+        This method extracts post URLs/titles from the pre-fetch context
+        and appends them to the first activity of each day as a reliable
+        fallback.
+        """
+        import re
+
+        # Parse post metadata from the context block
+        xhs_posts: list[dict[str, str]] = []
+        # Pattern: ### TITLE\nAuthor: XXX | Likes: N | Collects: N\nURL: https://...
+        for block in xhs_context.split("---"):
+            title_m = re.search(r"###\s*(.+)", block)
+            url_m = re.search(r"URL:\s*(https://\S+)", block)
+            author_m = re.search(r"Author:\s*(.+?)\s*\|", block)
+            likes_m = re.search(r"Likes:\s*(\S+)", block)
+            if title_m and url_m:
+                xhs_posts.append({
+                    "title": title_m.group(1).strip(),
+                    "url": url_m.group(1).strip(),
+                    "snippet": f"by {author_m.group(1).strip() if author_m else '?'}, {likes_m.group(1) if likes_m else '?'} likes",
+                })
+
+        if not xhs_posts:
+            return
+
+        added = 0
+        for day in itinerary.days:
+            if not day.activities:
+                continue
+            # Add to first activity of each day
+            act = day.activities[0]
+            if act.source_links is None:
+                act.source_links = []
+            # Check if xiaohongshu links already exist
+            existing_urls = {sl.url for sl in act.source_links}
+            xhs_links = []
+            for post in xhs_posts:
+                if post["url"] not in existing_urls:
+                    from voyageai.schemas.itinerary import SourceLink
+                    xhs_links.append(SourceLink(
+                        title=post["title"],
+                        url=post["url"],
+                        source="xiaohongshu",
+                        snippet=post["snippet"],
+                    ))
+            # Prepend xiaohongshu links so they show in the default view
+            act.source_links = xhs_links + list(act.source_links)
+            added += len(xhs_links)
+        if added > 0:
+            logger.info("Post-processed: added %d Xiaohongshu links to source_links", added)
+
     async def _select_tools_with_rag(
         self,
         query: str,
@@ -570,6 +1041,17 @@ Rules:
                             )
                         logger.info("Injected core tool: %s", core_name)
 
+                # Filter out xiaohongshu tools — they are pre-fetched
+                # programmatically, so the LLM should not call them directly.
+                tool_selection.selected_tools = [
+                    t for t in tool_selection.selected_tools
+                    if not t.name.startswith("xiaohongshu__")
+                ]
+                openai_tools = [
+                    t for t in openai_tools
+                    if not t.get("function", {}).get("name", "").startswith("xiaohongshu__")
+                ]
+
                 selected_tool_names = [t.name for t in tool_selection.selected_tools]
                 await self._emit(progress_callback, "thinking", {
                     "text": (
@@ -580,39 +1062,38 @@ Rules:
                     ),
                 })
         else:
-            openai_tools = tool_registry.get_openai_tools()
-            selected_tool_names = tool_registry.list_tools()
+            openai_tools = [
+                t for t in tool_registry.get_openai_tools()
+                if not t.get("function", {}).get("name", "").startswith("xiaohongshu__")
+            ]
+            selected_tool_names = [
+                n for n in tool_registry.list_tools()
+                if not n.startswith("xiaohongshu__")
+            ]
         
-        # Build system prompt that mentions the available tools
-        system_prompt = AGENT_SYSTEM_PROMPT
+        # Build system prompt dynamically from whichever tools were selected
         if should_use_tool_rag and tool_selection:
-            # Customize system prompt to mention only selected tools
-            tool_descriptions = "\n".join([
-                f"- {t.name}: {t.description}"
+            tool_desc_list = [
+                {"name": t.name, "description": t.description}
                 for t in tool_selection.selected_tools
-            ])
-            system_prompt = f"""You are an expert travel planner assistant with access to real-time tools.
+            ]
+        else:
+            tool_desc_list = tool_registry.get_tool_descriptions()
+        system_prompt = _build_system_prompt(tool_desc_list)
 
-Your goal is to create detailed, practical travel itineraries. You have access to the following tools:
-{tool_descriptions}
-
-IMPORTANT WORKFLOW:
-1. First, use geocode_location (if available) to get coordinates for the destination
-2. Then use other tools (weather, distance) that need coordinates
-3. Check holidays for the destination country (if available)
-4. Consider currency conversion for budget (if available)
-5. Finally, generate a comprehensive itinerary
-
-When generating the final itinerary:
-- Include specific times for each activity
-- Consider weather conditions when planning outdoor activities
-- Account for holidays (some attractions may be closed)
-- Provide practical budget estimates in local currency
-- Include sunrise/sunset times for photography opportunities
-
-Always call relevant tools before generating the final itinerary to ensure accuracy."""
+        # ── Xiaohongshu pre-fetch (runs IN PARALLEL with first LLM iteration) ──
+        # Fire-and-forget the pre-fetch task. We'll await it before iteration 2
+        # so the LLM can use the results. This saves ~40s of serial waiting.
+        xhs_destination = self._extract_destination(requirements)
+        xhs_task: asyncio.Task[str | None] = asyncio.create_task(
+            self._prefetch_xiaohongshu(
+                destination=xhs_destination,
+                progress_callback=progress_callback,
+            )
+        )
+        xhs_injected = False  # True once we inject the results into messages
         
-        # Initialize messages
+        # Initialize messages (without xiaohongshu context — injected later)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
@@ -649,6 +1130,10 @@ First, gather relevant information using the available tools, then generate a co
             })
         
         try:
+            # Track tools that have permanently failed (auth errors, etc.)
+            # so the LLM is told not to retry them.
+            failed_tools: dict[str, str] = {}  # tool_name -> error reason
+
             for iteration in range(max_iter):
                 logger.info(f"Agent iteration {iteration + 1}/{max_iter}")
                 
@@ -656,6 +1141,66 @@ First, gather relevant information using the available tools, then generate a co
                     "stage": "TOOL_CALLING",
                     "message": f"Agent reasoning, iteration {iteration + 1}...",
                 })
+
+                # Inject Xiaohongshu context once the pre-fetch completes.
+                # On iteration >= 1, await the result (non-blocking if done).
+                if not xhs_injected and xhs_task.done():
+                    try:
+                        xhs_context = xhs_task.result()
+                        if xhs_context:
+                            messages.append({
+                                "role": "system",
+                                "content": xhs_context,
+                            })
+                            logger.info(
+                                "Injected Xiaohongshu context (%d chars) before iteration %d",
+                                len(xhs_context), iteration + 1,
+                            )
+                    except Exception as e:
+                        logger.warning("Xiaohongshu pre-fetch result error: %s", e)
+                    xhs_injected = True
+                elif not xhs_injected and iteration >= 1:
+                    # If iteration 2+ and pre-fetch still running, wait briefly
+                    if not xhs_task.done():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(xhs_task), timeout=10,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.info("Xiaohongshu pre-fetch still running at iteration %d, will retry next", iteration + 1)
+                        except Exception as e:
+                            logger.warning("Xiaohongshu pre-fetch error at iteration %d: %s", iteration + 1, e)
+                            xhs_injected = True  # Don't retry on real errors
+                    # Check again if done now
+                    if xhs_task.done():
+                        try:
+                            xhs_context = xhs_task.result()
+                            if xhs_context:
+                                messages.append({
+                                    "role": "system",
+                                    "content": xhs_context,
+                                })
+                                logger.info(
+                                    "Injected Xiaohongshu context (%d chars) at iteration %d",
+                                    len(xhs_context), iteration + 1,
+                                )
+                        except Exception as e:
+                            logger.warning("Xiaohongshu pre-fetch result error: %s", e)
+                        xhs_injected = True
+
+                # If there are permanently failed tools, inject an advisory
+                # system message so the LLM avoids retrying them.
+                if failed_tools:
+                    advisory_lines = [
+                        f"- {name}: {reason}" for name, reason in failed_tools.items()
+                    ]
+                    advisory = (
+                        "IMPORTANT: The following tools have PERMANENT errors and "
+                        "must NOT be retried. Use alternative tools instead:\n"
+                        + "\n".join(advisory_lines)
+                        + "\nPrefer web_search as a fallback for place/restaurant/hotel data."
+                    )
+                    messages.append({"role": "system", "content": advisory})
                 
                 # Call LLM with tools
                 response = await self.client.chat.completions.create(
@@ -721,6 +1266,16 @@ First, gather relevant information using the available tools, then generate a co
                         progress_callback=progress_callback,
                     )
                     all_tool_traces.extend(traces)
+
+                    # Detect permanently failed tools
+                    for trace in traces:
+                        if not trace.success and _is_permanent_error(trace.error):
+                            if trace.tool_name not in failed_tools:
+                                failed_tools[trace.tool_name] = trace.error or "unknown"
+                                logger.warning(
+                                    "Marking tool %s as permanently failed: %s",
+                                    trace.tool_name, trace.error,
+                                )
                     
                     # Add tool results to messages
                     messages.extend(tool_results)
@@ -728,6 +1283,17 @@ First, gather relevant information using the available tools, then generate a co
                     continue  # Next iteration
                 
                 # No tool calls — LLM is done reasoning.
+                # Last chance: inject Xiaohongshu context before final generation
+                if not xhs_injected and xhs_task.done():
+                    try:
+                        xhs_context = xhs_task.result()
+                        if xhs_context:
+                            messages.append({"role": "system", "content": xhs_context})
+                            logger.info("Injected Xiaohongshu context (%d chars) before final generation", len(xhs_context))
+                    except Exception:
+                        pass
+                    xhs_injected = True
+
                 # Generate a quick plan outline before full generation (Phase 4)
                 logger.info("Tool calling complete, generating plan outline...")
                 
@@ -748,14 +1314,35 @@ First, gather relevant information using the available tools, then generate a co
                     "message": "Generating full structured itinerary...",
                 })
                 
+                # Run final generation with periodic heartbeat so the user
+                # knows we're still working (o4-mini can take 30-60s).
+                # The callback is also passed into _generate_structured_itinerary
+                # so it can emit o-series reasoning_content ("thinking") events
+                # directly to the frontend — users can watch the AI think in real time.
                 itinerary, content, final_tokens, final_llm_calls = (
-                    await self._generate_structured_itinerary(
-                        requirements=requirements,
-                        messages=messages,
+                    await self._with_heartbeat(
+                        self._generate_structured_itinerary(
+                            requirements=requirements,
+                            messages=messages,
+                            progress_callback=progress_callback,
+                        ),
+                        progress_callback,
+                        interval=8,
+                        message="Crafting your detailed itinerary — this takes a moment for quality results...",
                     )
                 )
                 total_tokens += final_tokens
                 llm_calls.extend(final_llm_calls)
+
+                # Post-process: inject Xiaohongshu links into source_links
+                # if the LLM didn't include them (LLM often ignores this).
+                if itinerary and xhs_injected and xhs_task.done():
+                    try:
+                        xhs_ctx = xhs_task.result()
+                        if xhs_ctx:
+                            self._inject_xhs_source_links(itinerary, xhs_ctx)
+                    except Exception:
+                        pass
                 
                 processing_time = int((time.time() - start_time) * 1000)
                 total_cost = round(sum(c.cost_usd for c in llm_calls), 6)
@@ -802,6 +1389,9 @@ First, gather relevant information using the available tools, then generate a co
             raise RuntimeError(f"Agent exceeded max iterations ({max_iter})")
             
         except Exception as e:
+            # Cancel any in-flight pre-fetch task
+            if not xhs_task.done():
+                xhs_task.cancel()
             logger.error(f"Agent failed: {e}")
             total_cost = round(sum(c.cost_usd for c in llm_calls), 6)
             return AgentResponse(
@@ -829,19 +1419,25 @@ First, gather relevant information using the available tools, then generate a co
     "end_date": "2024-04-03",
     "total_days": 3,
     "budget": "Medium ($100-200/day)",
-    "interests": ["culture", "food"]
+    "interests": ["culture", "food"],
+    "best_season": "Spring (cherry blossom season)",
+    "currency": "JPY",
+    "language": "Japanese"
   },
   "days": [
     {
       "day_number": 1,
       "date": "2024-04-01",
       "theme": "Arrival and City Exploration",
+      "summary": "Start the day at historic Asakusa, then head to Tokyo Station for lunch.",
+      "weather_forecast": "Sunny, 18°C / 64°F",
+      "total_walking_km": 4.2,
       "activities": [
         {
           "activity_id": "act-day1-001",
           "time": "09:00-11:00",
           "title": "Visit Senso-ji Temple",
-          "description": "Explore Tokyo's oldest Buddhist temple in Asakusa.",
+          "description": "Explore Tokyo's oldest Buddhist temple in Asakusa. The Kaminarimon gate and Nakamise shopping street lead to the main hall.",
           "location": {
             "name": "Senso-ji Temple",
             "latitude": 35.7148,
@@ -850,13 +1446,24 @@ First, gather relevant information using the available tools, then generate a co
             "place_type": "temple"
           },
           "estimated_cost": "Free",
-          "notes": ["Visit early morning to avoid crowds"]
+          "duration_minutes": 120,
+          "notes": ["Visit early morning to avoid crowds", "Don't miss the five-story pagoda"],
+          "highlights": ["Kaminarimon Thunder Gate", "Nakamise-dori shopping street"],
+          "rating": 4.7,
+          "booking_required": false,
+          "accessibility": "Wheelchair accessible main hall",
+          "website_url": "https://www.senso-ji.jp/",
+          "source_links": [
+            {"title": "Official Website", "url": "https://www.senso-ji.jp/", "source": "official", "snippet": "Tokyo's oldest temple, founded in 645 AD"},
+            {"title": "Senso-ji on Google Maps", "url": "https://maps.google.com/?q=Senso-ji+Temple+Tokyo", "source": "google_maps"},
+            {"title": "浅草寺打卡攻略", "url": "https://www.xiaohongshu.com/explore/sensoji", "source": "xiaohongshu", "snippet": "小红书旅行达人推荐的浅草寺最佳拍照点和周边美食"}
+          ]
         },
         {
           "activity_id": "act-day1-002",
           "time": "12:00-13:30",
           "title": "Lunch at Ramen Street",
-          "description": "Sample authentic Tokyo ramen at Tokyo Station's underground ramen alley.",
+          "description": "Sample authentic Tokyo ramen at Tokyo Station's underground ramen alley. Eight acclaimed ramen shops compete for your taste buds.",
           "location": {
             "name": "Tokyo Ramen Street",
             "latitude": 35.6812,
@@ -865,12 +1472,29 @@ First, gather relevant information using the available tools, then generate a co
             "place_type": "restaurant"
           },
           "estimated_cost": "$12-15",
-          "notes": ["Try the tsukemen (dipping noodles)"]
+          "duration_minutes": 90,
+          "notes": ["Try the tsukemen (dipping noodles)"],
+          "distance_from_previous": {
+            "km": 4.8,
+            "transport_mode": "subway",
+            "transport_detail": "Ginza Line from Asakusa to Kanda, then walk",
+            "duration_minutes": 20,
+            "transit_cost": "¥210 (~$1.50)"
+          },
+          "cuisine_type": "Japanese Ramen",
+          "reservation_tip": "No reservation needed — queue during off-peak hours",
+          "website_url": "https://www.tokyoeki-1bangai.co.jp/ramenstreet/",
+          "source_links": [
+            {"title": "Official Website", "url": "https://www.tokyoeki-1bangai.co.jp/ramenstreet/", "source": "official"},
+            {"title": "东京拉面街必吃推荐", "url": "https://www.xiaohongshu.com/explore/ramen-street", "source": "xiaohongshu", "snippet": "8家拉面名店全测评，附排队时间"}
+          ]
         }
       ]
     }
   ],
-  "tips": ["Get a Suica card for easy transit", "Carry cash — many small shops don't accept cards"]
+  "tips": ["Get a Suica card for easy transit", "Carry cash — many small shops don't accept cards"],
+  "packing_suggestions": ["Comfortable walking shoes", "Portable WiFi or SIM card"],
+  "emergency_info": {"police": "110", "ambulance": "119", "embassy_note": "Check your country's embassy in Tokyo"}
 }"""
 
     async def _generate_structured_itinerary(
@@ -878,6 +1502,7 @@ First, gather relevant information using the available tools, then generate a co
         requirements: str,
         messages: list[dict[str, Any]],
         max_retries: int = 2,
+        progress_callback: ProgressCallback | None = None,
     ) -> tuple[StructuredItinerary, str, int, list[LLMCallRecord]]:
         """
         Generate a structured itinerary using prompt-guided JSON generation.
@@ -888,6 +1513,7 @@ First, gather relevant information using the available tools, then generate a co
         3. Guide structure via prompt with an example
         4. Validate with Pydantic (lenient: coerce types, fill defaults)
         5. If days are missing, retry with targeted "complete the missing days" prompt
+        6. Emit o-series reasoning_content as "thinking" events for frontend display
         
         Args:
             requirements: Original user requirements
@@ -928,8 +1554,12 @@ First, gather relevant information using the available tools, then generate a co
 ## Agent Analysis
 {reasoning_snippet}
 
-## Required JSON Structure
-Follow this exact structure (but with ALL days filled in):
+## JSON Structure
+Follow this base structure (but with ALL days filled in). The required fields are:
+metadata (destination, start_date, end_date, total_days, budget, interests),
+days[] (day_number, date, theme, activities[]), activities (activity_id, time, title, description, location, estimated_cost, notes).
+
+Example with both required and optional enrichment fields:
 
 ```json
 {self._ITINERARY_JSON_EXAMPLE}
@@ -943,17 +1573,31 @@ Follow this exact structure (but with ALL days filled in):
 5. date format: "YYYY-MM-DD".
 6. location must include real latitude and longitude coordinates.
 7. Do NOT skip, abbreviate, or combine any days into one.
+8. IMPORTANT — you are free to add ANY additional fields that are useful for this specific trip. The schema is flexible. Add fields like:
+   - distance_from_previous: {{ km, transport_mode, transport_detail, duration_minutes, transit_cost }} for EVERY activity after the first one each day
+   - duration_minutes, highlights, rating, booking_required, booking_url, reservation_tip
+   - cuisine_type (for restaurants), accommodation_class (for hotels)
+   - weather_forecast, total_walking_km (on day level)
+   - best_season, currency, language, packing_suggestions, emergency_info (on metadata/root level)
+   Use your judgment — add what's most valuable for THIS specific destination and trip type.
 
 Return ONLY the JSON object, no other text."""
 
         system_msg = (
             "You are a travel itinerary generator. Output a single JSON object "
-            "matching the structure shown in the example. Include ALL days requested. "
+            "following the base structure shown in the example. Include ALL days requested. "
+            "You MUST include distance_from_previous (with km, transport_mode, duration_minutes) "
+            "for every activity except the first one each day. "
+            "You MUST include website_url (official website, null if unknown) and "
+            "source_links (array of reference links with title, url, source, snippet) "
+            "for EVERY activity. Populate source_links from tool results and known URLs. "
+            "Add any additional fields you think are valuable for this specific trip — "
+            "the schema is flexible and the frontend will render them. "
             "Respond with ONLY valid JSON, no markdown, no commentary."
         )
         
         # First attempt
-        content, finish_reason, tokens, _in, _out = await self._call_json_model(
+        content, finish_reason, tokens, _in, _out, reasoning = await self._call_json_model(
             model=final_model,
             system=system_msg,
             user=final_prompt,
@@ -966,6 +1610,14 @@ Return ONLY the JSON object, no other text."""
             output_tokens=_out,
             cost_usd=_calc_cost(final_model, _in, _out),
         ))
+        
+        # Emit o-series reasoning/thinking content to frontend
+        if reasoning and progress_callback:
+            await self._emit(progress_callback, "thinking", {
+                "message": reasoning,
+                "source": "reasoning_model",
+                "model": final_model,
+            })
         
         # Validate
         itinerary, errors = self._validate_itinerary(content)
@@ -989,7 +1641,7 @@ Return ONLY the JSON object, no other text."""
             )
             
             for retry in range(max_retries):
-                retry_content, retry_finish, retry_tokens, r_in, r_out = await self._call_json_model(
+                retry_content, retry_finish, retry_tokens, r_in, r_out, retry_reasoning = await self._call_json_model(
                     model=final_model,
                     system=f"Generate a COMPLETE {expected_days}-day travel itinerary as JSON. You MUST include ALL {expected_days} days.",
                     user=(
@@ -1010,6 +1662,13 @@ Return ONLY the JSON object, no other text."""
                     output_tokens=r_out,
                     cost_usd=_calc_cost(final_model, r_in, r_out),
                 ))
+                
+                if retry_reasoning and progress_callback:
+                    await self._emit(progress_callback, "thinking", {
+                        "message": retry_reasoning,
+                        "source": "reasoning_model",
+                        "model": final_model,
+                    })
                 
                 retry_itinerary, retry_errors = self._validate_itinerary(retry_content)
                 if retry_itinerary and len(retry_itinerary.days) > actual_days:
@@ -1040,7 +1699,7 @@ Return ONLY the JSON object, no other text."""
         )
         
         for retry in range(max_retries):
-            retry_content, retry_finish, retry_tokens, r_in, r_out = await self._call_json_model(
+            retry_content, retry_finish, retry_tokens, r_in, r_out, retry_reasoning = await self._call_json_model(
                 model=final_model,
                 system=system_msg,
                 user=(
@@ -1059,6 +1718,13 @@ Return ONLY the JSON object, no other text."""
                 output_tokens=r_out,
                 cost_usd=_calc_cost(final_model, r_in, r_out),
             ))
+            
+            if retry_reasoning and progress_callback:
+                await self._emit(progress_callback, "thinking", {
+                    "message": retry_reasoning,
+                    "source": "reasoning_model",
+                    "model": final_model,
+                })
             
             retry_itinerary, retry_errors = self._validate_itinerary(retry_content)
             if retry_itinerary:
@@ -1089,7 +1755,7 @@ Return ONLY the JSON object, no other text."""
         model: str,
         system: str,
         user: str,
-    ) -> tuple[str, str, int, int, int]:
+    ) -> tuple[str, str, int, int, int, str]:
         """
         Call the LLM with json_object response format (no strict schema).
         
@@ -1097,9 +1763,11 @@ Return ONLY the JSON object, no other text."""
         o-series reasoning models (o4-mini, o3, etc.):
         - o-series uses max_completion_tokens instead of max_tokens
         - o-series uses developer role instead of system role
+        - o-series returns reasoning_content (chain-of-thought thinking)
         
         Returns:
-            Tuple of (content, finish_reason, total_tokens, input_tokens, output_tokens)
+            Tuple of (content, finish_reason, total_tokens, input_tokens,
+                      output_tokens, reasoning_content)
         """
         is_reasoning = self._is_o_series(model)
         
@@ -1139,14 +1807,21 @@ Return ONLY the JSON object, no other text."""
         finish_reason = response.choices[0].finish_reason or "unknown"
         content = response.choices[0].message.content or ""
         
+        # Extract reasoning content (o-series chain-of-thought thinking)
+        # This is the model's internal reasoning process that can be shown to users
+        reasoning_content = ""
+        msg = response.choices[0].message
+        if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+            reasoning_content = msg.reasoning_content
+        
         logger.info(
             "JSON model call: model=%s, finish_reason=%s, tokens=%d "
-            "(in=%d, out=%d, reasoning=%d), output_len=%d",
+            "(in=%d, out=%d, reasoning=%d), output_len=%d, reasoning_content_len=%d",
             model, finish_reason, tokens, input_tokens, output_tokens,
-            reasoning_tokens, len(content),
+            reasoning_tokens, len(content), len(reasoning_content),
         )
         
-        return content, finish_reason, tokens, input_tokens, output_tokens
+        return content, finish_reason, tokens, input_tokens, output_tokens, reasoning_content
 
     @staticmethod
     def _validate_itinerary(
@@ -1284,6 +1959,32 @@ Keep it concise. Return ONLY JSON."""
             error=result.error,
             latency_ms=result.latency_ms,
         )
+
+
+# ── Failed-tool detection ──────────────────────────────────────────
+
+# Patterns that indicate a permanent / non-retriable tool failure.
+# If a tool error matches any of these, the agent should NOT retry it.
+_PERMANENT_ERROR_PATTERNS: list[str] = [
+    "invalid",
+    "expired",
+    "blocked",
+    "unauthorized",
+    "forbidden",
+    "api key",
+    "401",
+    "403",
+    "not configured",
+    "quota exceeded",
+]
+
+
+def _is_permanent_error(error: str | None) -> bool:
+    """Return True if the tool error indicates a permanent failure."""
+    if not error:
+        return False
+    lower = error.lower()
+    return any(pat in lower for pat in _PERMANENT_ERROR_PATTERNS)
 
 
 # Singleton instance

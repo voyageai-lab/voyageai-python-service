@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     mongodb_collection_results: str = "planning_results"
 
     # Worker Configuration (Module 12)
-    worker_pipeline_timeout_seconds: int = 120
+    worker_pipeline_timeout_seconds: int = 180
 
     # Foursquare Places API (free tier, no credit card)
     foursquare_api_key: str = ""
@@ -66,6 +66,10 @@ class Settings(BaseSettings):
 
     # Google Maps API (Places, Directions, Geocoding — $200/mo free credit)
     google_maps_api_key: str = ""
+
+    # Quality filter: minimum rating for place recommendations (0.0 to 5.0)
+    google_maps_min_rating: float = 3.5
+    foursquare_min_rating: float = 0.0  # Foursquare uses 0-10 scale; 0 = no filter
 
 
 settings = Settings()

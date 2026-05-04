@@ -578,6 +578,47 @@ TOOL_DEFINITIONS: list[ToolMetadata] = [
     ),
 
     # =========================================================================
+    # Google Maps Place Details Tool (via MCP)
+    # =========================================================================
+    ToolMetadata(
+        name="googlemaps__get_place_details",
+        description=(
+            "Get detailed information about a specific place from Google Maps. "
+            "Returns website URL, phone number, opening hours, editorial summary, "
+            "reviews, and Google Maps link. Use the place_id returned by "
+            "googlemaps__search_places to get full details including the official website."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "place_id": {
+                    "type": "string",
+                    "description": "Google Maps place ID (from search_places results)",
+                },
+            },
+            "required": ["place_id"],
+        },
+        example_queries=[
+            "Get the official website for this restaurant",
+            "What are the opening hours of this museum?",
+            "Show me reviews for this hotel",
+            "Get the phone number for this attraction",
+            "What's the website URL for this place?",
+            "Detailed information about this restaurant",
+            "Find the official site for Sagrada Familia",
+            "Get contact details for this hotel",
+            "Opening hours and reviews for this cafe",
+            "More details about this place from Google Maps",
+        ],
+        rate_limit_per_minute=60,
+        timeout_seconds=10,
+        requires_api_key=True,
+        is_enabled=True,
+        priority=8,
+    ),
+
+    # =========================================================================
     # Google Maps Directions Tool (via MCP)
     # =========================================================================
     ToolMetadata(
@@ -615,6 +656,99 @@ TOOL_DEFINITIONS: list[ToolMetadata] = [
         requires_api_key=True,
         is_enabled=True,
         priority=8,
+    ),
+
+    # =========================================================================
+    # Xiaohongshu Search Tool (via MCP)
+    # =========================================================================
+    ToolMetadata(
+        name="xiaohongshu__search_feeds",
+        description=(
+            "Search Xiaohongshu (小红书) for travel posts, reviews, and recommendations. "
+            "Returns user-generated content with photos, tips, and local insights. "
+            "Great for finding hidden gems, real visitor experiences, food guides, "
+            "and photo spots. Content is primarily in Chinese but covers worldwide destinations."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Search keyword (supports Chinese and English, e.g., '东京旅游攻略' or 'Tokyo travel guide')"
+                },
+            },
+            "required": ["keyword"],
+        },
+        example_queries=[
+            # Destination guides
+            "What do people say about visiting Tokyo on Xiaohongshu?",
+            "Xiaohongshu travel tips for Barcelona",
+            "小红书上的巴黎旅游攻略",
+            "Social media recommendations for Bali",
+            # Food and restaurants
+            "Best restaurants in Osaka according to Xiaohongshu",
+            "小红书美食推荐 东京",
+            "Food guide for Seoul from Chinese travelers",
+            "Xiaohongshu ramen recommendations Tokyo",
+            # Photo spots and hidden gems
+            "Instagram-worthy spots in Santorini from Xiaohongshu",
+            "Hidden gems in Kyoto that Chinese tourists love",
+            "小红书打卡地 巴塞罗那",
+            "Best photo spots recommended on social media",
+            # Travel experiences and reviews
+            "Real visitor reviews of the Sagrada Familia",
+            "What Chinese tourists think about London",
+            "小红书旅行体验分享",
+            "User travel reviews and experiences",
+        ],
+        rate_limit_per_minute=10,
+        timeout_seconds=30,
+        requires_api_key=False,
+        is_enabled=True,
+        priority=7,
+    ),
+
+    # =========================================================================
+    # Xiaohongshu Feed Detail Tool (via MCP)
+    # =========================================================================
+    ToolMetadata(
+        name="xiaohongshu__get_feed_detail",
+        description=(
+            "Get the full text content and details of a specific Xiaohongshu (小红书) post/note. "
+            "Returns the post description text (travel tips, itineraries, restaurant recommendations, "
+            "ticket prices, local insights), author info, images, and engagement metrics. "
+            "Use this AFTER search_feeds to get the actual text content of promising posts. "
+            "The 'desc' field contains rich travel guides with specific recommendations."
+        ),
+        category="external_api",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "feed_id": {
+                    "type": "string",
+                    "description": "Xiaohongshu note ID, obtained from the 'id' field of search_feeds results"
+                },
+                "xsec_token": {
+                    "type": "string",
+                    "description": "Access token, obtained from the 'xsecToken' field of search_feeds results"
+                },
+            },
+            "required": ["feed_id", "xsec_token"],
+        },
+        example_queries=[
+            "Get the full content of this Xiaohongshu travel post",
+            "Read the detailed tips from this 小红书 note",
+            "What does this Xiaohongshu post say about Barcelona restaurants?",
+            "Get travel recommendations from this XHS note",
+            "Extract the itinerary details from this Xiaohongshu post",
+            "What specific restaurants does this Xiaohongshu post recommend?",
+        ],
+        rate_limit_per_minute=10,
+        timeout_seconds=30,
+        requires_api_key=False,
+        is_enabled=True,
+        priority=7,
     ),
 
     # =========================================================================

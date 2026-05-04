@@ -126,7 +126,7 @@ class AttractionsTool(BaseTool):
     Input:
         latitude (float): Latitude of the center point
         longitude (float): Longitude of the center point
-        radius (int): Search radius in meters (default 5000, max 25000)
+        radius (int): Search radius in meters (default 5000, max 50000)
         categories (str): Comma-separated categories to filter
         limit (int): Max results (default 10, max 20)
 
@@ -139,7 +139,8 @@ class AttractionsTool(BaseTool):
         "Search for tourist attractions, landmarks, museums, and points of interest "
         "near a specific location. Requires latitude and longitude coordinates. "
         "Can filter by categories: cultural, architecture, historic, natural, "
-        "religion, museums, amusements, food, beaches."
+        "religion, museums, amusements, food, beaches. "
+        "Use a larger radius (10000-50000) for island or rural destinations."
     )
     parameters_schema = {
         "type": "object",
@@ -154,7 +155,7 @@ class AttractionsTool(BaseTool):
             },
             "radius": {
                 "type": "integer",
-                "description": "Search radius in meters (default 5000, max 25000)",
+                "description": "Search radius in meters (default 5000, max 50000). Use 10000-50000 for island or rural areas.",
                 "default": 5000,
             },
             "categories": {
@@ -174,6 +175,9 @@ class AttractionsTool(BaseTool):
         "additionalProperties": False,
     }
 
+    # Maximum allowed radius (meters)
+    _MAX_RADIUS = 50000
+
     def __init__(self, timeout: float = 15.0):
         self.timeout = timeout
 
@@ -185,7 +189,12 @@ class AttractionsTool(BaseTool):
         categories: str = "",
         limit: int = 10,
     ) -> ToolResult:
-        """Search for attractions near the given coordinates."""
+        """Search for attractions near the given coordinates.
+
+        If the initial search returns no results and the radius is below
+        the maximum, automatically retries with an expanded radius (3x)
+        to handle sparse/remote locations like islands or rural areas.
+        """
         start_time = time.time()
         input_args = {
             "latitude": latitude,
@@ -195,57 +204,31 @@ class AttractionsTool(BaseTool):
             "limit": limit,
         }
 
-        radius = min(radius, 25000)
+        radius = min(radius, self._MAX_RADIUS)
         limit = min(limit, 20)
 
         # Resolve OSM tag filters from categories
         tag_filters = self._resolve_tags(categories)
 
-        # Build Overpass QL query
-        query = self._build_overpass_query(latitude, longitude, radius, limit, tag_filters)
-
         try:
-            data = await self._query_overpass(query)
-
-            # Parse results
-            attractions = []
-            elements = data.get("elements", [])
-
-            for elem in elements[:limit]:
-                tags = elem.get("tags", {})
-                name = tags.get("name", "")
-                if not name:
-                    continue  # Skip unnamed features
-
-                lat = elem.get("lat") or (elem.get("center", {}).get("lat"))
-                lon = elem.get("lon") or (elem.get("center", {}).get("lon"))
-
-                # Build a human-readable kind string
-                kind = self._infer_kind(tags)
-
-                attractions.append({
-                    "name": name,
-                    "kind": kind,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "distance_m": None,
-                    "description": tags.get("description", ""),
-                    "wikipedia": tags.get("wikipedia", ""),
-                    "website": tags.get("website", ""),
-                    "opening_hours": tags.get("opening_hours", ""),
-                })
+            attractions, final_radius = await self._search_with_auto_expand(
+                latitude, longitude, radius, limit, tag_filters,
+            )
 
             output = {
                 "center": {"latitude": latitude, "longitude": longitude},
-                "radius_m": radius,
+                "radius_m": final_radius,
                 "categories": categories,
                 "attractions": attractions,
                 "count": len(attractions),
             }
+            if final_radius != radius:
+                output["auto_expanded"] = True
+                output["original_radius_m"] = radius
 
             logger.info(
-                "Attractions search at (%.4f, %.4f): %d results",
-                latitude, longitude, len(attractions),
+                "Attractions search at (%.4f, %.4f): %d results (radius=%dm)",
+                latitude, longitude, len(attractions), final_radius,
             )
 
             return ToolResult(
@@ -275,6 +258,70 @@ class AttractionsTool(BaseTool):
                 error=f"Attractions search error: {e}",
                 latency_ms=int((time.time() - start_time) * 1000),
             )
+
+    async def _search_with_auto_expand(
+        self,
+        latitude: float,
+        longitude: float,
+        radius: int,
+        limit: int,
+        tag_filters: list[tuple[str, str]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Run the Overpass query, auto-expanding radius on empty results.
+
+        Returns:
+            Tuple of (attraction list, final radius used).
+        """
+        current_radius = radius
+
+        while True:
+            query = self._build_overpass_query(
+                latitude, longitude, current_radius, limit, tag_filters,
+            )
+            data = await self._query_overpass(query)
+            elements = data.get("elements", [])
+
+            attractions = self._parse_elements(elements, limit)
+
+            if attractions or current_radius >= self._MAX_RADIUS:
+                return attractions, current_radius
+
+            # Auto-expand: triple the radius up to max
+            expanded = min(current_radius * 3, self._MAX_RADIUS)
+            logger.info(
+                "No attractions at %dm, expanding radius to %dm",
+                current_radius, expanded,
+            )
+            current_radius = expanded
+
+    def _parse_elements(
+        self, elements: list[dict[str, Any]], limit: int,
+    ) -> list[dict[str, Any]]:
+        """Parse Overpass elements into attraction dicts."""
+        attractions: list[dict[str, Any]] = []
+        for elem in elements[:limit]:
+            tags = elem.get("tags", {})
+            name = tags.get("name", "")
+            if not name:
+                continue
+
+            lat = elem.get("lat") or (elem.get("center", {}).get("lat"))
+            lon = elem.get("lon") or (elem.get("center", {}).get("lon"))
+
+            kind = self._infer_kind(tags)
+
+            attractions.append({
+                "name": name,
+                "kind": kind,
+                "latitude": lat,
+                "longitude": lon,
+                "distance_m": None,
+                "description": tags.get("description", ""),
+                "wikipedia": tags.get("wikipedia", ""),
+                "website": tags.get("website", ""),
+                "opening_hours": tags.get("opening_hours", ""),
+            })
+        return attractions
 
     def _resolve_tags(self, categories: str) -> list[tuple[str, str]]:
         """Convert user-friendly category names to OSM tag pairs."""

@@ -164,9 +164,11 @@ class FoursquareSearchTool(BaseTool):
         limit = min(limit, 10)
 
         # Build request params
+        # Request website, url, and rating fields for source link enrichment + quality filtering
         params: dict[str, Any] = {
             "query": query,
             "limit": limit,
+            "fields": "name,location,geocodes,categories,distance,fsq_id,website,link,rating",
         }
 
         if latitude is not None and longitude is not None:
@@ -208,12 +210,24 @@ class FoursquareSearchTool(BaseTool):
                 resp.raise_for_status()
                 data = resp.json()
 
-            # Parse results
+            # Parse results, filtering by minimum rating if configured
+            min_rating = settings.foursquare_min_rating
             places = []
-            for result in data.get("results", [])[:limit]:
+            filtered_count = 0
+            for result in data.get("results", []):
+                rating = result.get("rating")
+                # Foursquare uses 0-10 scale
+                if min_rating > 0 and rating is not None and rating < min_rating:
+                    filtered_count += 1
+                    continue
+
                 location = result.get("location", {})
                 geocodes = result.get("geocodes", {}).get("main", {})
                 categories_list = result.get("categories", [])
+
+                fsq_id = result.get("fsq_id", "")
+                website = result.get("website", "")
+                fsq_link = result.get("link", "")
 
                 places.append({
                     "name": result.get("name", ""),
@@ -222,8 +236,14 @@ class FoursquareSearchTool(BaseTool):
                     "longitude": geocodes.get("longitude"),
                     "category": categories_list[0].get("name", "") if categories_list else "",
                     "distance_m": result.get("distance"),
-                    "fsq_id": result.get("fsq_id", ""),
+                    "rating": rating,
+                    "fsq_id": fsq_id,
+                    "website": website,
+                    "foursquare_url": fsq_link or (f"https://foursquare.com/v/{fsq_id}" if fsq_id else ""),
                 })
+
+            places.sort(key=lambda x: (x.get("rating") or 0), reverse=True)
+            places = places[:limit]
 
             output = {
                 "query": query,

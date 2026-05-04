@@ -33,6 +33,39 @@ class MCPServerConfig:
     description: str = ""
 
 
+# Known MCP server configurations for documentation and quick setup.
+# These are the servers supported out of the box; configure via env vars.
+#
+# ┌──────────────┬──────────────────┬──────────────────────────────────────────┐
+# │ Server       │ Transport        │ Description                              │
+# ├──────────────┼──────────────────┼──────────────────────────────────────────┤
+# │ googlemaps   │ stdio            │ Google Maps: directions, places, geocode │
+# │ xiaohongshu  │ streamable-http  │ Xiaohongshu: social media travel search  │
+# └──────────────┴──────────────────┴──────────────────────────────────────────┘
+#
+# Xiaohongshu MCP setup:
+#   1. git clone https://github.com/xpzouying/xiaohongshu-mcp
+#   2. cd xiaohongshu-mcp && go run .
+#   3. Server runs on http://localhost:18060/mcp
+#   4. Set env: MCP_SERVERS=xiaohongshu
+#              MCP_SERVER_xiaohongshu_TRANSPORT=streamable-http
+#              MCP_SERVER_xiaohongshu_URL=http://localhost:18060/mcp
+#
+# Tools auto-discovered: xiaohongshu__search_feeds, xiaohongshu__get_feed_detail, etc.
+
+KNOWN_SERVERS: dict[str, dict[str, str]] = {
+    "googlemaps": {
+        "transport": "stdio",
+        "description": "Google Maps for directions, places, and geocoding",
+    },
+    "xiaohongshu": {
+        "transport": "streamable-http",
+        "url": "http://localhost:18060/mcp",
+        "description": "Xiaohongshu social media search for travel recommendations and reviews",
+    },
+}
+
+
 class MCPRegistry:
     """Registry of available MCP servers.
 
@@ -41,6 +74,10 @@ class MCPRegistry:
         MCP_SERVER_server1_TRANSPORT=stdio
         MCP_SERVER_server1_COMMAND=npx,-y,@modelcontextprotocol/server-google-maps
         MCP_SERVER_server1_ENV_GOOGLE_MAPS_API_KEY=xxx
+
+    Known servers (see KNOWN_SERVERS above):
+        - googlemaps: Google Maps via stdio transport
+        - xiaohongshu: Xiaohongshu social media via streamable-http transport
     """
 
     def __init__(self) -> None:

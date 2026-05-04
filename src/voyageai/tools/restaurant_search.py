@@ -50,7 +50,7 @@ class RestaurantSearchTool(BaseTool):
     Input:
         latitude (float): Center latitude
         longitude (float): Center longitude
-        radius (int): Search radius in meters (default 1000, max 5000)
+        radius (int): Search radius in meters (default 3000, max 15000)
         cuisine (str): Comma-separated cuisine types (optional)
         limit (int): Max results (default 10, max 20)
 
@@ -63,7 +63,8 @@ class RestaurantSearchTool(BaseTool):
         "Search for restaurants, cafes, and food establishments near a location. "
         "Requires latitude and longitude. Can filter by cuisine type "
         "(e.g., japanese, italian, thai, seafood). Returns restaurant names, "
-        "types, coordinates, and cuisine information."
+        "types, coordinates, and cuisine information. "
+        "Use a larger radius (5000-15000) for island or rural destinations."
     )
     parameters_schema = {
         "type": "object",
@@ -78,8 +79,8 @@ class RestaurantSearchTool(BaseTool):
             },
             "radius": {
                 "type": "integer",
-                "description": "Search radius in meters (default 1000, max 5000)",
-                "default": 1000,
+                "description": "Search radius in meters (default 3000, max 15000). Use 5000-15000 for island or rural areas.",
+                "default": 3000,
             },
             "cuisine": {
                 "type": "string",
@@ -98,15 +99,23 @@ class RestaurantSearchTool(BaseTool):
     def __init__(self, timeout: float = 15.0):
         self.timeout = timeout
 
+    # Maximum allowed radius (meters)
+    _MAX_RADIUS = 15000
+
     async def execute(
         self,
         latitude: float,
         longitude: float,
-        radius: int = 1000,
+        radius: int = 3000,
         cuisine: str = "",
         limit: int = 10,
     ) -> ToolResult:
-        """Search for restaurants near the given coordinates."""
+        """Search for restaurants near the given coordinates.
+
+        If the initial search returns no results and the radius is below
+        the maximum, automatically retries with an expanded radius (3x)
+        to handle sparse/remote locations like islands or rural areas.
+        """
         start_time = time.time()
         input_args = {
             "latitude": latitude,
@@ -116,68 +125,28 @@ class RestaurantSearchTool(BaseTool):
             "limit": limit,
         }
 
-        radius = min(radius, 5000)
+        radius = min(radius, self._MAX_RADIUS)
         limit = min(limit, 20)
 
-        # Build Overpass QL query
-        # Search for nodes and ways tagged as restaurant, cafe, or fast_food
-        cuisine_filter = ""
-        if cuisine:
-            # Build regex filter for cuisine types
-            cuisines = [c.strip() for c in cuisine.split(",")]
-            cuisine_regex = "|".join(cuisines)
-            cuisine_filter = f'["cuisine"~"{cuisine_regex}",i]'
-
-        overpass_query = f"""
-[out:json][timeout:25];
-(
-  node["amenity"="restaurant"]{cuisine_filter}(around:{radius},{latitude},{longitude});
-  node["amenity"="cafe"]{cuisine_filter}(around:{radius},{latitude},{longitude});
-  way["amenity"="restaurant"]{cuisine_filter}(around:{radius},{latitude},{longitude});
-);
-out center {limit};
-"""
-
         try:
-            data = await self._query_overpass(overpass_query)
-
-            # Parse results
-            restaurants = []
-            elements = data.get("elements", [])
-
-            for elem in elements[:limit]:
-                tags = elem.get("tags", {})
-                name = tags.get("name", "")
-                if not name:
-                    continue
-
-                # Get coordinates (node has lat/lon, way has center)
-                lat = elem.get("lat") or (elem.get("center", {}).get("lat"))
-                lon = elem.get("lon") or (elem.get("center", {}).get("lon"))
-
-                restaurants.append({
-                    "name": name,
-                    "cuisine": tags.get("cuisine", ""),
-                    "latitude": lat,
-                    "longitude": lon,
-                    "amenity_type": tags.get("amenity", "restaurant"),
-                    "opening_hours": tags.get("opening_hours", ""),
-                    "phone": tags.get("phone", ""),
-                    "website": tags.get("website", ""),
-                    "address": _build_address(tags),
-                })
+            restaurants, final_radius = await self._search_with_auto_expand(
+                latitude, longitude, radius, cuisine, limit,
+            )
 
             output = {
                 "center": {"latitude": latitude, "longitude": longitude},
-                "radius_m": radius,
+                "radius_m": final_radius,
                 "cuisine_filter": cuisine,
                 "restaurants": restaurants,
                 "count": len(restaurants),
             }
+            if final_radius != radius:
+                output["auto_expanded"] = True
+                output["original_radius_m"] = radius
 
             logger.info(
-                "Restaurant search at (%.4f, %.4f): %d results",
-                latitude, longitude, len(restaurants),
+                "Restaurant search at (%.4f, %.4f): %d results (radius=%dm)",
+                latitude, longitude, len(restaurants), final_radius,
             )
 
             return ToolResult(
@@ -207,6 +176,94 @@ out center {limit};
                 error=f"Restaurant search error: {e}",
                 latency_ms=int((time.time() - start_time) * 1000),
             )
+
+    async def _search_with_auto_expand(
+        self,
+        latitude: float,
+        longitude: float,
+        radius: int,
+        cuisine: str,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Run the Overpass query, auto-expanding radius on empty results.
+
+        Returns:
+            Tuple of (restaurant list, final radius used).
+        """
+        current_radius = radius
+
+        while True:
+            elements = await self._run_overpass_query(
+                latitude, longitude, current_radius, cuisine, limit,
+            )
+
+            restaurants = self._parse_elements(elements, limit)
+
+            if restaurants or current_radius >= self._MAX_RADIUS:
+                return restaurants, current_radius
+
+            # Auto-expand: triple the radius up to max
+            expanded = min(current_radius * 3, self._MAX_RADIUS)
+            logger.info(
+                "No restaurants at %dm, expanding radius to %dm",
+                current_radius, expanded,
+            )
+            current_radius = expanded
+
+    async def _run_overpass_query(
+        self,
+        latitude: float,
+        longitude: float,
+        radius: int,
+        cuisine: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Build and execute the Overpass QL query, return raw elements."""
+        cuisine_filter = ""
+        if cuisine:
+            cuisines = [c.strip() for c in cuisine.split(",")]
+            cuisine_regex = "|".join(cuisines)
+            cuisine_filter = f'["cuisine"~"{cuisine_regex}",i]'
+
+        overpass_query = f"""
+[out:json][timeout:25];
+(
+  node["amenity"="restaurant"]{cuisine_filter}(around:{radius},{latitude},{longitude});
+  node["amenity"="cafe"]{cuisine_filter}(around:{radius},{latitude},{longitude});
+  way["amenity"="restaurant"]{cuisine_filter}(around:{radius},{latitude},{longitude});
+);
+out center {limit};
+"""
+        data = await self._query_overpass(overpass_query)
+        return data.get("elements", [])
+
+    @staticmethod
+    def _parse_elements(
+        elements: list[dict[str, Any]], limit: int,
+    ) -> list[dict[str, Any]]:
+        """Parse Overpass elements into restaurant dicts."""
+        restaurants: list[dict[str, Any]] = []
+        for elem in elements[:limit]:
+            tags = elem.get("tags", {})
+            name = tags.get("name", "")
+            if not name:
+                continue
+
+            lat = elem.get("lat") or (elem.get("center", {}).get("lat"))
+            lon = elem.get("lon") or (elem.get("center", {}).get("lon"))
+
+            restaurants.append({
+                "name": name,
+                "cuisine": tags.get("cuisine", ""),
+                "latitude": lat,
+                "longitude": lon,
+                "amenity_type": tags.get("amenity", "restaurant"),
+                "opening_hours": tags.get("opening_hours", ""),
+                "phone": tags.get("phone", ""),
+                "website": tags.get("website", ""),
+                "address": _build_address(tags),
+            })
+        return restaurants
 
     async def _query_overpass(self, query: str) -> dict[str, Any]:
         """Query Overpass with failover across mirror endpoints."""

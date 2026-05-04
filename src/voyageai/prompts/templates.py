@@ -62,6 +62,21 @@ ITINERARY_EXAMPLE = {
                         "Try fortune slips (omikuji) for ¥100",
                         "Best photo spot: in front of the main hall",
                     ],
+                    "website_url": "https://www.senso-ji.jp/",
+                    "source_links": [
+                        {
+                            "title": "Official Website",
+                            "url": "https://www.senso-ji.jp/",
+                            "source": "official",
+                            "snippet": "Tokyo's oldest temple, founded in 645 AD",
+                        },
+                        {
+                            "title": "浅草寺打卡攻略",
+                            "url": "https://www.xiaohongshu.com/explore/sensoji",
+                            "source": "xiaohongshu",
+                            "snippet": "小红书旅行达人推荐的浅草寺最佳拍照点和周边美食",
+                        },
+                    ],
                 },
                 {
                     "activity_id": "act-day1-002",
@@ -80,6 +95,20 @@ ITINERARY_EXAMPLE = {
                     "notes": [
                         "Cash only",
                         "Expect a short wait during lunch rush",
+                    ],
+                    "website_url": "https://www.tempura-daikokuya.com/",
+                    "source_links": [
+                        {
+                            "title": "Official Website",
+                            "url": "https://www.tempura-daikokuya.com/",
+                            "source": "official",
+                        },
+                        {
+                            "title": "Daikokuya on Foursquare",
+                            "url": "https://foursquare.com/v/daikokuya",
+                            "source": "foursquare",
+                            "snippet": "Rated 4.5/5 — Famous for their sesame oil tempura",
+                        },
                     ],
                 },
             ],

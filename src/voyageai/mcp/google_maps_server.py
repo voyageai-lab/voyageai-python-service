@@ -7,6 +7,7 @@ via the MCP Streamable HTTP transport.
 
 Tools provided:
   - search_places: Text Search via Google Maps Places API (New)
+  - get_place_details: Place Details via Google Maps Places API (New)
   - get_directions: Driving/walking/transit directions via Directions API
 
 Usage:
@@ -56,6 +57,9 @@ GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 # Tool: search_places
 # ---------------------------------------------------------------------------
 
+MIN_RATING = float(os.environ.get("GOOGLE_MAPS_MIN_RATING", "3.5"))
+
+
 @mcp.tool()
 async def search_places(
     query: str,
@@ -64,12 +68,14 @@ async def search_places(
     radius: int = 5000,
     place_type: str | None = None,
     limit: int = 5,
+    min_rating: float | None = None,
 ) -> str:
     """Search for places (restaurants, hotels, attractions, museums, cafes,
     bars, parks, landmarks) using Google Maps.
 
     Returns names, addresses, ratings, price levels, and Google Maps URLs.
     Very accurate global data with 200M+ places.
+    Low-rated places (below min_rating) are automatically filtered out.
 
     Args:
         query: Natural language search (e.g., 'ramen near Shinjuku station')
@@ -80,6 +86,7 @@ async def search_places(
                     museum, park, tourist_attraction, shopping_mall, airport,
                     train_station, church, spa, night_club
         limit: Maximum results (default 5, max 10)
+        min_rating: Minimum rating threshold (0-5). Defaults to 3.5.
     """
     if not GOOGLE_MAPS_API_KEY:
         return json.dumps({"error": "GOOGLE_MAPS_API_KEY not configured"})
@@ -105,10 +112,10 @@ async def search_places(
         body["includedType"] = place_type
 
     field_mask = (
-        "places.displayName,places.formattedAddress,places.location,"
+        "places.id,places.displayName,places.formattedAddress,places.location,"
         "places.rating,places.userRatingCount,places.priceLevel,"
         "places.types,places.businessStatus,places.googleMapsUri,"
-        "places.primaryType"
+        "places.primaryType,places.websiteUri"
     )
 
     try:
@@ -126,27 +133,42 @@ async def search_places(
             resp.raise_for_status()
             data = resp.json()
 
+        rating_threshold = min_rating if min_rating is not None else MIN_RATING
+
         places = []
-        for p in data.get("places", [])[:limit]:
+        filtered_count = 0
+        for p in data.get("places", []):
+            rating = p.get("rating")
+            if rating_threshold > 0 and rating is not None and rating < rating_threshold:
+                filtered_count += 1
+                continue
+
             loc = p.get("location", {})
             display = p.get("displayName", {})
             places.append({
                 "name": display.get("text", ""),
+                "place_id": p.get("id", ""),
                 "address": p.get("formattedAddress", ""),
                 "latitude": loc.get("latitude"),
                 "longitude": loc.get("longitude"),
-                "rating": p.get("rating"),
+                "rating": rating,
                 "user_ratings_total": p.get("userRatingCount"),
                 "price_level": p.get("priceLevel"),
                 "type": p.get("primaryType", ""),
                 "business_status": p.get("businessStatus", ""),
                 "google_maps_url": p.get("googleMapsUri", ""),
+                "website": p.get("websiteUri", ""),
             })
+
+        places.sort(key=lambda x: (x.get("rating") or 0), reverse=True)
+        places = places[:limit]
 
         return json.dumps({
             "query": query,
             "places": places,
             "count": len(places),
+            "filtered_below_rating": filtered_count,
+            "min_rating_applied": rating_threshold,
             "source": "google_maps_mcp",
         }, indent=2)
 
@@ -154,6 +176,98 @@ async def search_places(
         return json.dumps({"error": f"Google Maps API error: {e.response.status_code}"})
     except Exception as e:
         return json.dumps({"error": f"Search failed: {e}"})
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_place_details
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_place_details(
+    place_id: str,
+) -> str:
+    """Get detailed information about a specific place from Google Maps.
+
+    Returns website URL, phone number, opening hours, reviews,
+    editorial summary, and Google Maps link. Use the place_id
+    returned by search_places.
+
+    Args:
+        place_id: Google Maps place ID (from search_places results)
+    """
+    if not GOOGLE_MAPS_API_KEY:
+        return json.dumps({"error": "GOOGLE_MAPS_API_KEY not configured"})
+
+    field_mask = (
+        "id,displayName,formattedAddress,location,"
+        "rating,userRatingCount,priceLevel,primaryType,"
+        "websiteUri,nationalPhoneNumber,internationalPhoneNumber,"
+        "regularOpeningHours,googleMapsUri,"
+        "editorialSummary,reviews"
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://places.googleapis.com/v1/places/{place_id}",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+                    "X-Goog-FieldMask": field_mask,
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        loc = data.get("location", {})
+        display = data.get("displayName", {})
+
+        hours = data.get("regularOpeningHours", {})
+        weekday_text = hours.get("weekdayDescriptions", [])
+
+        reviews_raw = data.get("reviews", [])[:5]
+        reviews = []
+        for r in reviews_raw:
+            reviews.append({
+                "author": r.get("authorAttribution", {}).get(
+                    "displayName", ""
+                ),
+                "rating": r.get("rating"),
+                "text": (r.get("text", {}).get("text", ""))[:200],
+                "time": r.get("relativePublishTimeDescription", ""),
+            })
+
+        editorial = data.get("editorialSummary", {})
+
+        result = {
+            "name": display.get("text", ""),
+            "place_id": data.get("id", place_id),
+            "address": data.get("formattedAddress", ""),
+            "latitude": loc.get("latitude"),
+            "longitude": loc.get("longitude"),
+            "rating": data.get("rating"),
+            "user_ratings_total": data.get("userRatingCount"),
+            "price_level": data.get("priceLevel"),
+            "type": data.get("primaryType", ""),
+            "website": data.get("websiteUri", ""),
+            "phone": data.get("internationalPhoneNumber", "")
+            or data.get("nationalPhoneNumber", ""),
+            "google_maps_url": data.get("googleMapsUri", ""),
+            "opening_hours": weekday_text,
+            "editorial_summary": editorial.get("text", ""),
+            "reviews": reviews,
+            "source": "google_maps_mcp",
+        }
+
+        return json.dumps(result, indent=2)
+
+    except httpx.HTTPStatusError as e:
+        return json.dumps(
+            {"error": f"Place Details API error: {e.response.status_code}"}
+        )
+    except Exception as e:
+        return json.dumps({"error": f"Place details failed: {e}"})
 
 
 # ---------------------------------------------------------------------------

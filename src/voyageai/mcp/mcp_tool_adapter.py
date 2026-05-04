@@ -23,6 +23,7 @@ Tool names are prefixed with the server name:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -35,6 +36,12 @@ from voyageai.mcp.mcp_client import MCPClientManager
 from voyageai.tools.base import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
+
+# Default timeout for MCP tool calls (seconds).
+# Xiaohongshu search uses a headless browser and can take 30-45s.
+# Since xiaohongshu tools are pre-fetched (not in the LLM loop),
+# a longer timeout is acceptable.
+MCP_TOOL_TIMEOUT_SECONDS = 60
 
 
 class MCPToolAdapter(BaseTool):
@@ -74,59 +81,37 @@ class MCPToolAdapter(BaseTool):
         Each call:
         1. Opens a Streamable HTTP connection to the MCP server
         2. Initializes the MCP session
-        3. Calls the tool
+        3. Calls the tool (with timeout protection)
         4. Parses the response
         5. Closes the connection
+
+        A timeout guard (MCP_TOOL_TIMEOUT_SECONDS) prevents slow MCP
+        servers (e.g., Xiaohongshu needing login) from blocking the
+        entire agent pipeline.
         """
         start_time = time.time()
 
         try:
-            async with streamablehttp_client(url=self._server_url) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-
-                    result = await session.call_tool(self._mcp_tool, arguments=kwargs)
-
-            # Extract text content from MCP response
-            content_parts = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    content_parts.append(item.text)
-                elif hasattr(item, "data"):
-                    content_parts.append(str(item.data))
-                else:
-                    content_parts.append(str(item))
-
-            raw_text = "\n".join(content_parts)
-
-            # Check for MCP-level errors
-            if result.isError:
-                return ToolResult(
-                    tool_name=self.name,
-                    input_args=kwargs,
-                    output=None,
-                    success=False,
-                    error=raw_text,
-                    latency_ms=int((time.time() - start_time) * 1000),
-                )
-
-            # Parse JSON output (our MCP servers return JSON strings)
-            try:
-                output = json.loads(raw_text)
-            except (json.JSONDecodeError, TypeError):
-                output = raw_text
-
+            result = await asyncio.wait_for(
+                self._call_mcp(kwargs),
+                timeout=MCP_TOOL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
             latency = int((time.time() - start_time) * 1000)
-            logger.info("MCP tool %s completed in %dms", self.name, latency)
-
+            msg = (
+                f"MCP tool {self.name} timed out after "
+                f"{MCP_TOOL_TIMEOUT_SECONDS}s. The service may require "
+                f"login or is temporarily unavailable."
+            )
+            logger.warning(msg)
             return ToolResult(
                 tool_name=self.name,
                 input_args=kwargs,
-                output=output,
-                success=True,
+                output=None,
+                success=False,
+                error=msg,
                 latency_ms=latency,
             )
-
         except Exception as e:
             logger.error("MCP tool %s execution failed: %s", self.name, e)
             return ToolResult(
@@ -137,6 +122,57 @@ class MCPToolAdapter(BaseTool):
                 error=f"MCP tool error: {e}",
                 latency_ms=int((time.time() - start_time) * 1000),
             )
+
+        return result
+
+    async def _call_mcp(self, kwargs: dict[str, Any]) -> ToolResult:
+        """Internal: perform the actual MCP call (no timeout wrapper)."""
+        start_time = time.time()
+
+        async with streamablehttp_client(url=self._server_url) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(self._mcp_tool, arguments=kwargs)
+
+        # Extract text content from MCP response
+        content_parts = []
+        for item in result.content:
+            if hasattr(item, "text"):
+                content_parts.append(item.text)
+            elif hasattr(item, "data"):
+                content_parts.append(str(item.data))
+            else:
+                content_parts.append(str(item))
+
+        raw_text = "\n".join(content_parts)
+
+        # Check for MCP-level errors
+        if result.isError:
+            return ToolResult(
+                tool_name=self.name,
+                input_args=kwargs,
+                output=None,
+                success=False,
+                error=raw_text,
+                latency_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Parse JSON output (our MCP servers return JSON strings)
+        try:
+            output = json.loads(raw_text)
+        except (json.JSONDecodeError, TypeError):
+            output = raw_text
+
+        latency = int((time.time() - start_time) * 1000)
+        logger.info("MCP tool %s completed in %dms", self.name, latency)
+
+        return ToolResult(
+            tool_name=self.name,
+            input_args=kwargs,
+            output=output,
+            success=True,
+            latency_ms=latency,
+        )
 
 
 def create_mcp_tool_adapters(
