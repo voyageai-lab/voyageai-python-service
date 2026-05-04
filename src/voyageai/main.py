@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from voyageai.config import settings
 from voyageai.logging_config import setup_logging
-from voyageai.routers import health, planning, rag, tools
+from voyageai.routers import health, planning, rag, reference, tools
 
 # Initialize structured logging (JSON in production, plain text in debug)
 setup_logging(level="DEBUG" if settings.debug else "INFO")
@@ -34,4 +34,5 @@ app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(planning.router, prefix="/api/v1", tags=["Planning"])
 app.include_router(tools.router, prefix="/api/v1", tags=["Tools"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
+app.include_router(reference.router, prefix="/api/v1", tags=["Reference"])
 

@@ -150,6 +150,36 @@ For each activity in the final itinerary, you MUST populate:
 
   Even if a tool doesn't return a direct URL, you can construct useful links (e.g., Google Maps search URL for a location).
 
+MULTI-OPTION ALTERNATIVES (IMPORTANT):
+For each day, generate 1-2 alternative full-day schedules under the "alternatives" field.
+Each alternative is an array of activities (same structure as the primary "activities" array) representing a complete day plan.
+Guidelines:
+- The primary "activities" array is the RECOMMENDED schedule.
+- Each alternative should highlight a different aspect of the destination (e.g., foodie focus, art & culture, off-the-beaten-path, family-friendly, nightlife).
+- Give each alternative a distinctive flavor — suggest unique and interesting places that differ from the primary schedule.
+- Keep the same time structure (similar start/end times) so alternatives are easily swappable.
+- Include 2-4 activities per alternative, just like the primary schedule.
+
+Example "alternatives" field for a single day:
+"alternatives": [
+  [
+    {{"activity_id": "alt1-day1-001", "time": "09:00-11:30", "title": "...", ...}},
+    {{"activity_id": "alt1-day1-002", "time": "12:00-13:30", "title": "...", ...}}
+  ],
+  [
+    {{"activity_id": "alt2-day1-001", "time": "09:00-11:00", "title": "...", ...}},
+    {{"activity_id": "alt2-day1-002", "time": "11:30-13:00", "title": "...", ...}}
+  ]
+]
+
+REFERENCE ITINERARIES (RAG):
+When your RAG search results include documents with source="reference" or relevance_weight="high",
+these are curated reference itineraries imported by the user (from travel blogs, articles, or personal notes).
+- PRIORITIZE recommendations from reference documents over generic search results.
+- Incorporate specific places, restaurants, and tips mentioned in reference content.
+- Cite the reference source in source_links when using its recommendations.
+- If reference content conflicts with other data, prefer the reference unless it is clearly outdated.
+
 ITINERARY EDITING:
 When the user asks to edit an existing itinerary (e.g., "Day 1: add a museum", "Day 2: remove shopping", "replace X with Y"):
 1. Parse the edit operation: ADD, REMOVE, REPLACE, or REORDER
@@ -1595,7 +1625,8 @@ Example with both required and optional enrichment fields:
 5. date format: "YYYY-MM-DD".
 6. location must include real latitude and longitude coordinates.
 7. Do NOT skip, abbreviate, or combine any days into one.
-8. IMPORTANT — you are free to add ANY additional fields that are useful for this specific trip. The schema is flexible. Add fields like:
+8. Each day MUST include an "alternatives" array with 1-2 alternative full-day schedules (each a list of activities). The primary "activities" is the recommended plan; alternatives highlight different themes.
+9. IMPORTANT — you are free to add ANY additional fields that are useful for this specific trip. The schema is flexible. Add fields like:
    - distance_from_previous: {{ km, transport_mode, transport_detail, duration_minutes, transit_cost }} for EVERY activity after the first one each day
    - duration_minutes, highlights, rating, booking_required, booking_url, reservation_tip
    - cuisine_type (for restaurants), accommodation_class (for hotels)
