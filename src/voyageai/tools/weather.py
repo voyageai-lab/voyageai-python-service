@@ -171,15 +171,7 @@ class WeatherTool(BaseTool):
             # Limit range to 30 days max
             if (end - start).days > 30:
                 return False, "Date range cannot exceed 30 days"
-            
-            # Open-Meteo forecast supports up to 16 days ahead
-            # Open-Meteo archive supports historical dates back to 1940
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            max_forecast_date = today + timedelta(days=16)
-            
-            if end > max_forecast_date:
-                return False, f"Forecast only available up to 16 days ahead ({max_forecast_date.strftime('%Y-%m-%d')})"
-            
+
             return True, ""
             
         except ValueError:
@@ -190,6 +182,54 @@ class WeatherTool(BaseTool):
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         end = datetime.strptime(end_date, "%Y-%m-%d")
         return end < today
+
+    def _clamp_forecast_dates(
+        self, start_date: str, end_date: str
+    ) -> tuple[str, str, str | None, str | None]:
+        """Clamp end date to Open-Meteo's 16-day forecast horizon (from today).
+
+        Historical ranges use the archive API and are not clamped here.
+
+        Returns:
+            (effective_start, effective_end, trim_note, error_message)
+            If error_message is set, the caller should return failure.
+        """
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        max_forecast = today + timedelta(days=15)
+
+        if start_dt > max_forecast:
+            return (
+                start_date,
+                end_date,
+                None,
+                "Weather forecast is only available up to 16 days from today; "
+                "your trip starts beyond that window.",
+            )
+
+        trim_note: str | None = None
+        if end_dt > max_forecast:
+            end_dt = max_forecast
+            trim_note = (
+                f"Forecast limited through {max_forecast.strftime('%Y-%m-%d')} "
+                "(Open-Meteo API supports at most 16 days ahead)."
+            )
+
+        if start_dt > end_dt:
+            return (
+                start_date,
+                end_date,
+                None,
+                "No valid forecast window after applying the 16-day API limit.",
+            )
+
+        return (
+            start_dt.strftime("%Y-%m-%d"),
+            end_dt.strftime("%Y-%m-%d"),
+            trim_note,
+            None,
+        )
     
     async def execute(
         self,
@@ -250,10 +290,27 @@ class WeatherTool(BaseTool):
                 error=error,
                 latency_ms=0
             )
-        
+
+        # Choose API endpoint based on whether dates are in the past
+        use_archive = self._is_past_date_range(start_date, end_date)
+        trim_note: str | None = None
+        if not use_archive:
+            start_date, end_date, trim_note, horizon_err = self._clamp_forecast_dates(
+                start_date, end_date
+            )
+            if horizon_err:
+                return ToolResult(
+                    tool_name=self.name,
+                    input_args=input_args,
+                    output=None,
+                    success=False,
+                    error=horizon_err,
+                    latency_ms=0,
+                )
+            input_args["start_date"] = start_date
+            input_args["end_date"] = end_date
+
         try:
-            # Choose API endpoint based on whether dates are in the past
-            use_archive = self._is_past_date_range(start_date, end_date)
             
             if use_archive:
                 # Historical weather: use archive API (no precipitation_probability or UV)
@@ -329,8 +386,10 @@ class WeatherTool(BaseTool):
                 "location": {"latitude": latitude, "longitude": longitude},
                 "timezone": data.get("timezone", "UTC"),
                 "data_source": source,
-                "forecast": forecast
+                "forecast": forecast,
             }
+            if trim_note:
+                output["forecast_note"] = trim_note
             
             logger.info(
                 "Weather %s for (%s, %s): %d days retrieved",

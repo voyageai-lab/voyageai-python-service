@@ -96,7 +96,7 @@ class RestaurantSearchTool(BaseTool):
         "additionalProperties": False,
     }
 
-    def __init__(self, timeout: float = 15.0):
+    def __init__(self, timeout: float = 8.0):
         self.timeout = timeout
 
     # Maximum allowed radius (meters)
@@ -226,7 +226,7 @@ class RestaurantSearchTool(BaseTool):
             cuisine_filter = f'["cuisine"~"{cuisine_regex}",i]'
 
         overpass_query = f"""
-[out:json][timeout:25];
+[out:json][timeout:10];
 (
   node["amenity"="restaurant"]{cuisine_filter}(around:{radius},{latitude},{longitude});
   node["amenity"="cafe"]{cuisine_filter}(around:{radius},{latitude},{longitude});

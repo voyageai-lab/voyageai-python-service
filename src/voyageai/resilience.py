@@ -133,26 +133,21 @@ class ResilientAgentPipeline:
         user_id: str | None = None,
         conversation_context: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        existing_itinerary: str | None = None,
+        existing_itinerary_context: str | None = None,
     ) -> AgentResponse:
-        """Execute the agent pipeline with full resilience stack.
-
-        Order of operations:
-        1. Apply asyncio timeout
-        2. Run agent with retries
-        3. If all attempts fail, use fallback
-
-        Args:
-            requirements: User's travel planning requirements.
-            user_id: User ID for rate limiting.
-            conversation_context: Previous conversation history for follow-ups.
-
-        Returns:
-            AgentResponse (either from agent or fallback).
-        """
+        """Execute the agent pipeline with full resilience stack."""
         try:
             async with asyncio.timeout(self._timeout):
+                if existing_itinerary:
+                    return await self._agent.edit_existing_itinerary(
+                        edit_instruction=requirements,
+                        existing_itinerary_json=existing_itinerary,
+                        progress_callback=progress_callback,
+                    )
                 return await self._execute_with_retry(
-                    requirements, user_id, conversation_context, progress_callback
+                    requirements, user_id, conversation_context, progress_callback,
+                    existing_itinerary_context,
                 )
         except TimeoutError:
             logger.error(
@@ -180,18 +175,9 @@ class ResilientAgentPipeline:
         user_id: str | None,
         conversation_context: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        existing_itinerary_context: str | None = None,
     ) -> AgentResponse:
-        """Execute agent with tenacity retry logic.
-
-        Retries on:
-        - ConnectionError (network issues)
-        - TimeoutError (API timeout)
-        - RuntimeError (transient failures)
-
-        Does NOT retry on:
-        - ValueError (bad input, won't succeed on retry)
-        - KeyError (programming error)
-        """
+        """Execute agent with tenacity retry logic."""
         attempt = 0
 
         @retry(
@@ -213,6 +199,7 @@ class ResilientAgentPipeline:
                 user_id=user_id,
                 conversation_context=conversation_context,
                 progress_callback=progress_callback,
+                existing_itinerary_context=existing_itinerary_context,
             )
 
             # Track cost

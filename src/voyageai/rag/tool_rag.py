@@ -41,8 +41,15 @@ import logging
 import time
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings
+try:
+    import chromadb
+    from chromadb.config import Settings
+    _CHROMADB_AVAILABLE = True
+except Exception:
+    chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment,misc]
+    _CHROMADB_AVAILABLE = False
+
 from openai import AsyncOpenAI
 
 from voyageai.config import settings
@@ -100,8 +107,8 @@ class ToolRAG:
         """
         self.persist_directory = persist_directory
         self.similarity_threshold = similarity_threshold
-        self._client: chromadb.ClientAPI | None = None
-        self._collection: chromadb.Collection | None = None
+        self._client: Any = None
+        self._collection: Any = None
         self._openai: AsyncOpenAI | None = None
         self._tool_cache: dict[str, ToolMetadata] = {}  # Cache full metadata
     
@@ -120,6 +127,10 @@ class ToolRAG:
         Should be called during application startup.
         """
         if self._client is not None and self._collection is not None:
+            return
+
+        if not _CHROMADB_AVAILABLE:
+            logger.warning("chromadb not available — Tool-RAG disabled")
             return
         
         logger.info("Initializing Tool-RAG")
@@ -142,46 +153,57 @@ class ToolRAG:
             }
         )
         
-        if self._openai is None:
+        if self._openai is None and settings.openai_api_key:
             self._openai = AsyncOpenAI(api_key=settings.openai_api_key)
         
         count = self._collection.count()
         logger.info(f"Tool-RAG initialized: {count} tools in collection")
-    
-    async def _get_embedding(self, text: str) -> list[float]:
-        """
-        Get embedding for text.
+
+    async def ensure_seeded(self, openai_client: AsyncOpenAI | None = None) -> None:
+        """Seed tool definitions if the collection is empty (lazy first-use seeding)."""
+        if self._collection is None:
+            return
+        if self._collection.count() > 0:
+            return
+
+        client = openai_client or self._openai
+        if client is None:
+            logger.warning("Tool-RAG collection empty but no OpenAI client for seeding")
+            return
+
+        from voyageai.rag.seed_definitions import TOOL_DEFINITIONS
+
+        logger.info("Auto-seeding %d tool definitions into Tool-RAG...", len(TOOL_DEFINITIONS))
+        await self.add_tools(TOOL_DEFINITIONS, openai_client=client)
+        logger.info("Auto-seeded %d tools into Tool-RAG", self._collection.count())
+
+    async def _get_embedding(
+        self,
+        text: str,
+        openai_client: AsyncOpenAI | None = None,
+    ) -> list[float]:
+        """Get embedding for text using the provided or default OpenAI client."""
+        client = openai_client or self._openai
+        if client is None:
+            raise RuntimeError("ToolRAG: no OpenAI client available (pass one via openai_client)")
         
-        Args:
-            text: Text to embed
-            
-        Returns:
-            Embedding vector
-        """
-        if self._openai is None:
-            raise RuntimeError("ToolRAG not initialized")
-        
-        response = await self._openai.embeddings.create(
+        response = await client.embeddings.create(
             input=text,
             model=EMBEDDING_MODEL
         )
         return response.data[0].embedding
     
-    async def add_tool(self, tool: ToolMetadata) -> None:
-        """
-        Add a tool to the Tool-RAG collection.
-        
-        Args:
-            tool: Tool metadata to add
-        """
+    async def add_tool(
+        self,
+        tool: ToolMetadata,
+        openai_client: AsyncOpenAI | None = None,
+    ) -> None:
+        """Add a tool to the Tool-RAG collection."""
         if self._collection is None:
             raise RuntimeError("ToolRAG not initialized")
         
-        # Generate embedding text
         embedding_text = tool.get_embedding_text()
-        
-        # Get embedding
-        embedding = await self._get_embedding(embedding_text)
+        embedding = await self._get_embedding(embedding_text, openai_client=openai_client)
         
         # Store in ChromaDB
         # We store the full tool metadata as JSON in metadata field
@@ -208,18 +230,14 @@ class ToolRAG:
         
         logger.info(f"Added tool to Tool-RAG: {tool.name}")
     
-    async def add_tools(self, tools: list[ToolMetadata]) -> int:
-        """
-        Add multiple tools to the collection.
-        
-        Args:
-            tools: List of tool metadata
-            
-        Returns:
-            Number of tools added
-        """
+    async def add_tools(
+        self,
+        tools: list[ToolMetadata],
+        openai_client: AsyncOpenAI | None = None,
+    ) -> int:
+        """Add multiple tools to the collection."""
         for tool in tools:
-            await self.add_tool(tool)
+            await self.add_tool(tool, openai_client=openai_client)
         return len(tools)
     
     async def select_tools(
@@ -228,32 +246,25 @@ class ToolRAG:
         top_k: int = 3,
         category_filter: str | None = None,
         include_disabled: bool = False,
+        openai_client: AsyncOpenAI | None = None,
     ) -> ToolSelectionResult:
-        """
-        Select relevant tools for a user query.
-        
-        This is the main entry point for Tool-RAG. It:
-        1. Embeds the user query
-        2. Searches ChromaDB for similar tools
-        3. Filters by category/availability
-        4. Returns top-K tools with scores
-        
+        """Select relevant tools for a user query via semantic similarity.
+
         Args:
             query: User query to match against tools
             top_k: Maximum number of tools to return
             category_filter: Optional category to filter by
             include_disabled: Whether to include disabled tools
-            
-        Returns:
-            ToolSelectionResult with selected tools and scores
+            openai_client: External OpenAI client for embedding (uses default if None)
         """
         start_time = time.time()
         
         if self._collection is None:
             raise RuntimeError("ToolRAG not initialized")
+
+        await self.ensure_seeded(openai_client=openai_client)
         
-        # Get query embedding
-        query_embedding = await self._get_embedding(query)
+        query_embedding = await self._get_embedding(query, openai_client=openai_client)
         
         # Build filter
         where_filter: dict[str, Any] | None = None

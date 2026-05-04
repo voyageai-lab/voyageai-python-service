@@ -178,7 +178,7 @@ class AttractionsTool(BaseTool):
     # Maximum allowed radius (meters)
     _MAX_RADIUS = 50000
 
-    def __init__(self, timeout: float = 15.0):
+    def __init__(self, timeout: float = 8.0):
         self.timeout = timeout
 
     async def execute(
@@ -357,7 +357,7 @@ class AttractionsTool(BaseTool):
 
         union_body = "\n".join(union_parts)
         # out center resolves way centroids; out meta gives more tags
-        return f"""[out:json][timeout:25];
+        return f"""[out:json][timeout:10];
 (
 {union_body}
 );

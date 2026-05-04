@@ -13,13 +13,18 @@ class Settings(BaseSettings):
 
     # OpenAI Configuration
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    # Use a reasoning model for the final structured output call.
-    # gpt-4o-mini struggles with long structured JSON (6+ day itineraries).
-    # o4-mini excels: built-in reasoning plans the full structure before generating,
-    # 100K output token limit eliminates truncation, and costs 3-5x less than gpt-4o.
-    # Tool calling stays on gpt-4o-mini (cheapest, fast, sufficient for tool selection).
+    openai_model: str = "gpt-4o"
     openai_final_model: str = "o4-mini"
+
+    # Gemini via OpenAI-compatible endpoint
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_model: str = "gemini-2.5-flash"
+
+    # Ollama fallback — local model used when no OpenAI key is configured.
+    # Ollama exposes an OpenAI-compatible API at /v1.
+    ollama_base_url: str = "http://192.168.1.62:11434/v1"
+    ollama_model: str = "gemma4:e2b"
+    ollama_enabled: bool = True
 
     # Service Configuration
     service_name: str = "voyageai-python-service"
@@ -55,7 +60,11 @@ class Settings(BaseSettings):
     mongodb_collection_results: str = "planning_results"
 
     # Worker Configuration (Module 12)
-    worker_pipeline_timeout_seconds: int = 180
+    worker_pipeline_timeout_seconds: int = 300
+    # Local LLM (Ollama) is much slower than OpenAI; allow a longer budget.
+    worker_pipeline_timeout_ollama_seconds: int = 900
+    # Must be >= longest pipeline run (ms) or the consumer leaves the group mid-task.
+    kafka_max_poll_interval_ms: int = 1_200_000
 
     # Foursquare Places API (free tier, no credit card)
     foursquare_api_key: str = ""

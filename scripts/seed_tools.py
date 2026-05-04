@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from voyageai.schemas.tool_metadata import ToolMetadata
 from voyageai.rag.tool_rag import ToolRAG
+from voyageai.rag.seed_definitions import TOOL_DEFINITIONS as _SHARED_DEFINITIONS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -850,4 +851,8 @@ async def seed_tools():
 
 
 if __name__ == "__main__":
-    asyncio.run(seed_tools())
+    from voyageai.config import settings
+    if not settings.openai_api_key:
+        logger.warning("No OPENAI_API_KEY set — skipping Tool-RAG seeding (embeddings require a key)")
+    else:
+        asyncio.run(seed_tools())

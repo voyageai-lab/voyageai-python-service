@@ -19,8 +19,15 @@ Usage:
 import logging
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings
+try:
+    import chromadb
+    from chromadb.config import Settings
+    _CHROMADB_AVAILABLE = True
+except Exception:
+    chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment,misc]
+    _CHROMADB_AVAILABLE = False
+
 from openai import AsyncOpenAI
 
 from voyageai.config import settings
@@ -63,8 +70,8 @@ class ChromaClient:
         """
         self.persist_directory = persist_directory
         self.collection_name = collection_name
-        self._client: chromadb.ClientAPI | None = None
-        self._collection: chromadb.Collection | None = None
+        self._client: Any = None
+        self._collection: Any = None
         self._openai: AsyncOpenAI | None = None
     
     @classmethod
@@ -86,6 +93,10 @@ class ChromaClient:
         
         logger.info(f"Initializing ChromaDB at {self.persist_directory}")
         
+        if not _CHROMADB_AVAILABLE:
+            logger.warning("chromadb not available — vector search disabled")
+            return
+
         # Create persistent client if not exists
         if self._client is None:
             self._client = chromadb.PersistentClient(

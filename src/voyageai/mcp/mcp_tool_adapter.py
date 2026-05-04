@@ -129,14 +129,19 @@ class MCPToolAdapter(BaseTool):
         """Internal: perform the actual MCP call (no timeout wrapper)."""
         start_time = time.time()
 
-        async with streamablehttp_client(url=self._server_url) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(self._mcp_tool, arguments=kwargs)
+        try:
+            async with streamablehttp_client(url=self._server_url) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    mcp_result = await session.call_tool(self._mcp_tool, arguments=kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"MCP connection/call failed for {self.name}: {exc}"
+            ) from exc
 
         # Extract text content from MCP response
         content_parts = []
-        for item in result.content:
+        for item in mcp_result.content:
             if hasattr(item, "text"):
                 content_parts.append(item.text)
             elif hasattr(item, "data"):
@@ -147,7 +152,7 @@ class MCPToolAdapter(BaseTool):
         raw_text = "\n".join(content_parts)
 
         # Check for MCP-level errors
-        if result.isError:
+        if mcp_result.isError:
             return ToolResult(
                 tool_name=self.name,
                 input_args=kwargs,

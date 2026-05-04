@@ -184,7 +184,7 @@ class CurrencyTool(BaseTool):
             )
         
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
                 response = await client.get(
                     f"{FRANKFURTER_URL}/latest",
                     params={
