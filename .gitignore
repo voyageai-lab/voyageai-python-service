@@ -61,3 +61,4 @@ Thumbs.db
 data/
 docs/*.md
 !docs/README.md
+.claude/
