@@ -32,6 +32,12 @@ dev = [
     "pytest-httpx>=0.30.0",
     "ruff>=0.8.0",
 ]
+# Optional gRPC transport (feat/grpc). Core HTTP service does not need this.
+# Install with: pip install -e ".[grpc]"
+grpc = [
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+]
 
 [build-system]
 requires = ["hatchling"]

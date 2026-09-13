@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package voyage;
+
+// Same business capability as the HTTP API, exposed over gRPC.
+// The servicer delegates to the exact same service layer (ai_service),
+// so HTTP and RPC are two transports over one implementation.
+service Voyage {
+  rpc Ping (PingRequest) returns (PingReply);
+  rpc Generate (GenerateRequest) returns (GenerateReply);
+}
+
+message PingRequest { string message = 1; }
+message PingReply {
+  string message = 1;
+  string service = 2;
+}
+
+message GenerateRequest {
+  string task_id = 1;
+  string user_id = 2;
+  string requirements = 3;
+}
+message GenerateReply {
+  string status = 1;          // COMPLETED / FAILED
+  string itinerary_json = 2;  // StructuredItinerary as JSON
+  string error = 3;
+}
