@@ -73,6 +73,23 @@ class AuthService:
         token = self._issue_token(user["id"])
         return TokenResponse(access_token=token)
 
+    def login_or_register_oauth(self, email: str) -> TokenResponse:
+        """Used by OAuth: ensure a user exists for this email, then issue a JWT.
+
+        OAuth users have no local password, so password_hash is None. We never
+        store a password for them, their identity is vouched for by the provider.
+        """
+        user = self._users.get(email)
+        if user is None:
+            user_id = str(uuid.uuid4())
+            self._users[email] = {
+                "id": user_id,
+                "email": email,
+                "password_hash": None,
+            }
+            logger.info(f"Registered OAuth user {email}")
+        return TokenResponse(access_token=self._issue_token(self._users[email]["id"]))
+
     def _issue_token(self, user_id: str) -> str:
         payload = {
             "sub": user_id,

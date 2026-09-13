@@ -7,7 +7,17 @@ from fastapi import FastAPI
 
 from voyageai.config import settings
 from voyageai.logging_config import setup_logging
-from voyageai.routers import auth, gmail, health, planning, rag, reference, tools
+from voyageai.routers import (
+    auth,
+    gmail,
+    health,
+    mock_provider,
+    oauth,
+    planning,
+    rag,
+    reference,
+    tools,
+)
 
 # Initialize structured logging (JSON in production, plain text in debug)
 setup_logging(level="DEBUG" if settings.debug else "INFO")
@@ -37,4 +47,6 @@ app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG"])
 app.include_router(reference.router, prefix="/api/v1", tags=["Reference"])
 app.include_router(gmail.router, prefix="/api/v1", tags=["Gmail"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
+app.include_router(oauth.router, prefix="/api/v1/auth", tags=["Auth"])
+app.include_router(mock_provider.router, prefix="/mock-oauth", tags=["MockOAuth demo"])
 
